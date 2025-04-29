@@ -1,5 +1,6 @@
 #include "Drumkit.hpp"
 
+#include <Audio/Settings/Model.hpp>
 #include <Media/AudioDecoder.hpp>
 
 #include <score/tools/ThreadPool.hpp>
@@ -196,6 +197,7 @@ std::shared_ptr<DrumkitInfo> parseDrumkit(const QString& filePath)
   int sent = 0;
   int recv = 0;
   auto& tp = score::TaskPool::instance();
+  auto rate = score::AppContext().settings<Audio::Settings::Model>().getRate();
   for(auto& inst : drumkit.instruments)
   {
     for(auto& layer : inst.layers)
@@ -204,10 +206,10 @@ std::shared_ptr<DrumkitInfo> parseDrumkit(const QString& filePath)
           = folder + QDir::separator() + QString::fromStdString(layer.filename);
 
       sent++;
-      tp.post([filename, &layer, &recv] {
+      tp.post([filename, &layer, &recv, rate] {
         try
         {
-          auto dec = Media::AudioDecoder::decode_synchronous(filename, 48000); // FIXME
+          auto dec = Media::AudioDecoder::decode_synchronous(filename, rate); // FIXME
           layer.data = std::move(dec->second);
         }
         catch(...)

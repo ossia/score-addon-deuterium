@@ -76,7 +76,9 @@ public:
 
   ossia::flat_map<int, drum_voice> voices;
 };
-static ossia::flat_map<int, drum_voice> loadVoices(const DrumkitInfo& drumkit)
+
+static ossia::flat_map<int, drum_voice>
+loadVoices(const DrumkitInfo& drumkit, double rate)
 {
   ossia::flat_map<int, drum_voice> voices;
   voices.reserve(drumkit.instruments.size());
@@ -91,14 +93,14 @@ static ossia::flat_map<int, drum_voice> loadVoices(const DrumkitInfo& drumkit)
       l.layer = &lay;
 
       l.amp_adsr.reset();
-      l.amp_adsr.set_sample_rate(48000.);
+      l.amp_adsr.set_sample_rate(rate);
       l.amp_adsr.attack(inst.Attack);
       l.amp_adsr.decay(inst.Decay);
       l.amp_adsr.sustain(inst.Sustain);
       l.amp_adsr.release(inst.Release);
 
       Dsp::Params params;
-      params[0] = 48000;
+      params[0] = rate;
       if(inst.filterActive)
       {
         params[1] = std::clamp(inst.filterCutoff * 20000., 20., 20000.);
@@ -130,7 +132,7 @@ Component::Component(
 
   if(proc.drumkit())
   {
-    node->reload(proc.drumkit(), loadVoices(*proc.drumkit()));
+    node->reload(proc.drumkit(), loadVoices(*proc.drumkit(), ctx.execState->sampleRate));
   }
   this->node = node;
 
@@ -139,7 +141,8 @@ Component::Component(
   connect(&proc, &Deuterium::ProcessModel::drumkitChanged, this, [this, node] {
     if(auto dk = this->process().drumkit())
     {
-      in_exec([node, dk, v = loadVoices(*dk)]() mutable {
+      in_exec([node, dk,
+               v = loadVoices(*dk, this->system().execState->sampleRate)]() mutable {
         node->reload(std::move(dk), std::move(v));
       });
     }
