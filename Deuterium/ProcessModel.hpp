@@ -34,13 +34,18 @@ public:
 
   ~ProcessModel() override;
 
+  void loadDrumkit(const QString& path);
+  void drumkitChanged() W_SIGNAL(drumkitChanged)
+
   std::shared_ptr<DrumkitInfo> drumkit() const noexcept { return m_drumkit; }
 
   std::unique_ptr<Process::Inlet> midi_in;
   std::unique_ptr<Process::Outlet> audio_out;
 
 private:
+  std::vector<Process::Preset> builtinPresets() const noexcept override;
   void loadPreset(const Process::Preset&) override;
+  QString m_drumkitPath;
   std::shared_ptr<DrumkitInfo> m_drumkit;
 };
 

@@ -41,7 +41,7 @@ namespace Executor
 {
 struct drum_layer
 {
-  Layer* layer{};
+  const Layer* layer{};
   gam::ADSR<double, double, halp::compat::gamma_domain> amp_adsr;
 
   static constexpr auto chans = 2;
@@ -50,7 +50,7 @@ struct drum_layer
 
 struct drum_voice
 {
-  Instrument* instrument{};
+  const Instrument* instrument{};
   std::vector<drum_layer> layers;
 
   int64_t position{};
@@ -60,8 +60,9 @@ struct drum_voice
 class deuterium_node final : public ossia::graph_node
 {
 public:
-  deuterium_node(std::shared_ptr<DrumkitInfo> kit, ossia::execution_state& st);
+  deuterium_node(ossia::execution_state& st);
 
+  void reload(std::shared_ptr<DrumkitInfo>&& kit, ossia::flat_map<int, drum_voice>&&);
   void run(const ossia::token_request& t, ossia::exec_state_facade) noexcept override;
   [[nodiscard]] std::string label() const noexcept override { return "deuterium"; }
 
@@ -75,30 +76,11 @@ public:
 
   ossia::flat_map<int, drum_voice> voices;
 };
-
-Component::Component(
-    Deuterium::ProcessModel& proc, const ::Execution::Context& ctx, QObject* parent)
-    : ::Execution::ProcessComponent_T<Deuterium::ProcessModel, ossia::node_process>{
-        proc, ctx, "DeuteriumComponent", parent}
+static ossia::flat_map<int, drum_voice> loadVoices(const DrumkitInfo& drumkit)
 {
-  std::shared_ptr<deuterium_node> node
-      = ossia::make_node<deuterium_node>(*ctx.execState, proc.drumkit(), *ctx.execState);
-
-  this->node = node;
-  m_ossia_process = std::make_shared<ossia::node_process>(node);
-}
-
-Component::~Component() { }
-
-deuterium_node::deuterium_node(
-    std::shared_ptr<DrumkitInfo> kit, ossia::execution_state& st)
-    : m_st{st}
-{
-  this->m_inlets.push_back(midi_in = new ossia::midi_inlet);
-  this->m_outlets.push_back(audio_out = new ossia::audio_outlet);
-
-  voices.reserve(kit->instruments.size());
-  for(auto& inst : kit->instruments)
+  ossia::flat_map<int, drum_voice> voices;
+  voices.reserve(drumkit.instruments.size());
+  for(auto& inst : drumkit.instruments)
   {
     drum_voice v;
     v.instrument = &inst;
@@ -119,8 +101,8 @@ deuterium_node::deuterium_node(
       params[0] = 48000;
       if(inst.filterActive)
       {
-        params[1] = std::clamp(inst.filterCutoff, 20., 20000.);
-        params[2] = inst.filterResonance;
+        params[1] = std::clamp(inst.filterCutoff * 20000., 20., 20000.);
+        params[2] = std::clamp(10. * inst.filterResonance + 0.1, 1., 10.1);
       }
       else
       {
@@ -135,6 +117,50 @@ deuterium_node::deuterium_node(
       voices[inst.midi_note] = std::move(v);
     }
   }
+  return voices;
+}
+
+Component::Component(
+    Deuterium::ProcessModel& proc, const ::Execution::Context& ctx, QObject* parent)
+    : ::Execution::ProcessComponent_T<Deuterium::ProcessModel, ossia::node_process>{
+        proc, ctx, "DeuteriumComponent", parent}
+{
+  std::shared_ptr<deuterium_node> node
+      = ossia::make_node<deuterium_node>(*ctx.execState, *ctx.execState);
+
+  if(proc.drumkit())
+  {
+    node->reload(proc.drumkit(), loadVoices(*proc.drumkit()));
+  }
+  this->node = node;
+
+  m_ossia_process = std::make_shared<ossia::node_process>(node);
+
+  connect(&proc, &Deuterium::ProcessModel::drumkitChanged, this, [this, node] {
+    if(auto dk = this->process().drumkit())
+    {
+      in_exec([node, dk, v = loadVoices(*dk)]() mutable {
+        node->reload(std::move(dk), std::move(v));
+      });
+    }
+  });
+}
+
+Component::~Component() { }
+
+deuterium_node::deuterium_node(ossia::execution_state& st)
+    : m_st{st}
+{
+  this->m_inlets.push_back(midi_in = new ossia::midi_inlet);
+  this->m_outlets.push_back(audio_out = new ossia::audio_outlet);
+}
+
+void deuterium_node::reload(
+    std::shared_ptr<DrumkitInfo>&& kit, ossia::flat_map<int, drum_voice>&& v)
+{
+  using namespace std;
+  swap(kit, m_drumkit);
+  swap(v, voices);
 }
 
 void deuterium_node::run(
@@ -223,31 +249,56 @@ void deuterium_node::run(
       const int64_t pos = voice.second.position;
       const auto n = std::min((int64_t)(pos + timings.length), frames);
 
-      if(channels == 1)
+      if(voice.second.instrument->filterActive)
       {
-        for(int64_t i = pos, k = 0; i < n; i++, k++)
+        if(channels == 1)
         {
-          double sample = data[0][i];
-          double arr[2] = {sample, sample};
-          double* parr[2] = {&arr[0], &arr[1]};
-          lay.lowpassFilter.process(1, parr);
+          for(int64_t i = pos, k = 0; i < n; i++, k++)
+          {
+            double sample = data[0][i];
+            double arr[2] = {sample, sample};
+            double* parr[2] = {&arr[0], &arr[1]};
+            lay.lowpassFilter.process(1, parr);
 
-          double aenv = lay.amp_adsr();
-          out_l[k] += arr[0] * aenv;
-          out_r[k] += arr[1] * aenv;
+            double aenv = lay.amp_adsr();
+            out_l[k] += arr[0] * aenv;
+            out_r[k] += arr[1] * aenv;
+          }
+        }
+        else if(channels == 2)
+        {
+          for(int64_t i = pos, k = 0; i < n; i++, k++)
+          {
+            double arr[2] = {data[0][i], data[1][i]};
+            double* parr[2] = {&arr[0], &arr[1]};
+            lay.lowpassFilter.process(1, parr);
+
+            double aenv = lay.amp_adsr();
+            out_l[k] += arr[0] * aenv;
+            out_r[k] += arr[1] * aenv;
+          }
         }
       }
-      else if(channels == 2)
+      else
       {
-        for(int64_t i = pos, k = 0; i < n; i++, k++)
+        if(channels == 1)
         {
-          double arr[2] = {data[0][i], data[1][i]};
-          double* parr[2] = {&arr[0], &arr[1]};
-          lay.lowpassFilter.process(1, parr);
-
-          double aenv = lay.amp_adsr();
-          out_l[k] += arr[0] * aenv;
-          out_r[k] += arr[1] * aenv;
+          for(int64_t i = pos, k = 0; i < n; i++, k++)
+          {
+            double sample = data[0][i];
+            double aenv = lay.amp_adsr();
+            out_l[k] += sample * aenv;
+            out_r[k] += sample * aenv;
+          }
+        }
+        else if(channels == 2)
+        {
+          for(int64_t i = pos, k = 0; i < n; i++, k++)
+          {
+            double aenv = lay.amp_adsr();
+            out_l[k] += data[0][i] * aenv;
+            out_r[k] += data[1][i] * aenv;
+          }
         }
       }
     }

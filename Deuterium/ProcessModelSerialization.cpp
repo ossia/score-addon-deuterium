@@ -16,8 +16,7 @@
 template <>
 void DataStreamReader::read(const Deuterium::ProcessModel& proc)
 {
-  // m_stream << proc.m_script << readDeuteriumState(*proc.fx.get());
-
+  m_stream << proc.m_drumkitPath;
   readPorts(*this, proc.m_inlets, proc.m_outlets);
 
   insertDelimiter();
@@ -26,39 +25,28 @@ void DataStreamReader::read(const Deuterium::ProcessModel& proc)
 template <>
 void DataStreamWriter::write(Deuterium::ProcessModel& proc)
 {
-  /*
-  QString str;
-  QByteArray dat;
-  m_stream >> str >> dat;
-  proc.setScript(str);
-
-  loadDeuteriumState(*proc.fx.get(), dat);
-
-*/
+  QString drumkitPath;
+  m_stream >> drumkitPath;
   writePorts(
       *this, components.interfaces<Process::PortFactoryList>(), proc.m_inlets,
       proc.m_outlets, &proc);
 
+  proc.loadDrumkit(drumkitPath);
   checkDelimiter();
 }
 
 template <>
 void JSONReader::read(const Deuterium::ProcessModel& proc)
 {
-  /*
-  obj["Script"] = proc.script();
-  obj["Chunk"] = readDeuteriumState(*proc.fx.get()).toBase64();
-  */
+  obj["Kit"] = proc.m_drumkitPath;
   readPorts(*this, proc.m_inlets, proc.m_outlets);
 }
 
 template <>
 void JSONWriter::write(Deuterium::ProcessModel& proc)
-{ /*
-  proc.setScript(obj["Script"].toString());
-  auto dat = QByteArray::fromBase64(obj["Chunk"].toByteArray());
-  loadDeuteriumState(*proc.fx.get(), dat);
-*/
+{
+  QString drumkitPath = obj["Kit"].toString();
+  proc.loadDrumkit(drumkitPath);
   writePorts(
       *this, components.interfaces<Process::PortFactoryList>(), proc.m_inlets,
       proc.m_outlets, &proc);
