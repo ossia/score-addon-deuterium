@@ -40,6 +40,11 @@ ProcessModel::ProcessModel(
 
 ProcessModel::~ProcessModel() { }
 
+QString ProcessModel::effect() const noexcept
+{
+  return m_drumkitPath;
+}
+
 void ProcessModel::loadDrumkit(const QString& path)
 {
   auto drumkit = parseDrumkit(path);

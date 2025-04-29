@@ -9,12 +9,6 @@ namespace Deuterium
 struct Layer
 {
   std::string filename;
-  ~Layer()
-  {
-    qDebug() << "Detryoing layer:" << filename;
-    data = {};
-    qDebug() << "Detroyed layer:" << filename;
-  }
   ossia::audio_array data;
   double min = 0.0f;
   double max = 1.0f;
@@ -45,12 +39,6 @@ struct Instrument
   bool filterActive = false;
   bool applyVelocity = false;
   std::vector<Layer> layers;
-  ~Instrument()
-  {
-    qDebug() << "Detryoing instrument:" << name;
-    layers.clear();
-    qDebug() << "Detoryed instrument:" << name;
-  }
 };
 
 struct DrumkitInfo

@@ -34,6 +34,7 @@ public:
 
   ~ProcessModel() override;
 
+  QString effect() const noexcept override;
   void loadDrumkit(const QString& path);
   void drumkitChanged() W_SIGNAL(drumkitChanged)
 
