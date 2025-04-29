@@ -12,7 +12,6 @@
 #include <score/tools/std/HashMap.hpp>
 
 #include <Deuterium/ApplicationPlugin.hpp>
-#include <Deuterium/Commands/CommandFactory.hpp>
 #include <Deuterium/Executor/Component.hpp>
 #include <Deuterium/Library.hpp>
 #include <Deuterium/ProcessFactory.hpp>
@@ -35,19 +34,6 @@ std::vector<score::InterfaceBase*> score_plugin_deuterium::factories(
       FW<Process::ProcessDropHandler, Deuterium::DropHandler>,
       FW<Execution::ProcessComponentFactory, Deuterium::Executor::ComponentFactory>>(
       ctx, key);
-}
-
-std::pair<const CommandGroupKey, CommandGeneratorMap> score_plugin_deuterium::make_commands()
-{
-  using namespace Deuterium;
-  std::pair<const CommandGroupKey, CommandGeneratorMap> cmds{
-      Deuterium::CommandFactoryName(), CommandGeneratorMap{}};
-
-  ossia::for_each_type<
-#include <score_plugin_deuterium_commands.hpp>
-      >(score::commands::FactoryInserter{cmds.second});
-
-  return cmds;
 }
 
 #include <score/plugins/PluginInstances.hpp>

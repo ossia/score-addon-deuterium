@@ -8,10 +8,6 @@ score_common_setup()
 
 # Files & main target
 set(HDRS
-  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/Commands/EditScript.hpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/Commands/ScriptMacro.hpp"
-  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/Commands/CommandFactory.hpp"
-
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/Executor/Component.hpp"
 
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/Drumkit.hpp"
@@ -26,8 +22,6 @@ set(SRCS
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/ProcessModelSerialization.cpp"
 
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/Executor/Component.cpp"
-
-  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/Commands/CommandFactory.cpp"
 
   "${CMAKE_CURRENT_SOURCE_DIR}/score_addon_deuterium.cpp"
 )
