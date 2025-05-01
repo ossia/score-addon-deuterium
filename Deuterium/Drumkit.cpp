@@ -3,6 +3,7 @@
 #include <Audio/Settings/Model.hpp>
 #include <Media/AudioDecoder.hpp>
 
+#include <score/application/ApplicationContext.hpp>
 #include <score/tools/ThreadPool.hpp>
 
 #include <QDir>
