@@ -1,4 +1,4 @@
-project(score_plugin_deuterium LANGUAGES CXX)
+project(score_addon_deuterium LANGUAGES CXX)
 
 if(NOT TARGET score_plugin_engine)
   return()

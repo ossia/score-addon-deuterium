@@ -19,11 +19,11 @@
 #include <score_plugin_deuterium_commands_files.hpp>
 #include <wobjectimpl.h>
 
-score_plugin_deuterium::score_plugin_deuterium() { }
+score_addon_deuterium::score_addon_deuterium() { }
 
-score_plugin_deuterium::~score_plugin_deuterium() = default;
+score_addon_deuterium::~score_addon_deuterium() = default;
 
-std::vector<score::InterfaceBase*> score_plugin_deuterium::factories(
+std::vector<score::InterfaceBase*> score_addon_deuterium::factories(
     const score::ApplicationContext& ctx, const score::InterfaceKey& key) const
 {
   return instantiate_factories<
@@ -37,4 +37,4 @@ std::vector<score::InterfaceBase*> score_plugin_deuterium::factories(
 }
 
 #include <score/plugins/PluginInstances.hpp>
-SCORE_EXPORT_PLUGIN(score_plugin_deuterium)
+SCORE_EXPORT_PLUGIN(score_addon_deuterium)

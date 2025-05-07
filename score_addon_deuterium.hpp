@@ -9,14 +9,14 @@
 #include <vector>
 #include <verdigris>
 
-class score_plugin_deuterium final
+class score_addon_deuterium final
     : public score::Plugin_QtInterface
     , public score::FactoryInterface_QtInterface
 {
   SCORE_PLUGIN_METADATA(1, "dddc3f7e-a879-4c86-b180-d90b7d456356")
 public:
-  score_plugin_deuterium();
-  virtual ~score_plugin_deuterium();
+  score_addon_deuterium();
+  virtual ~score_addon_deuterium();
 
 private:
   // Process & inspector
