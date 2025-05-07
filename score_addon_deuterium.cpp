@@ -16,7 +16,6 @@
 #include <Deuterium/Library.hpp>
 #include <Deuterium/ProcessFactory.hpp>
 
-#include <score_plugin_deuterium_commands_files.hpp>
 #include <wobjectimpl.h>
 
 score_addon_deuterium::score_addon_deuterium() { }
