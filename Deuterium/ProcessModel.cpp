@@ -21,8 +21,10 @@ ProcessModel::ProcessModel(
     QObject* parent)
     : Process::
           ProcessModel{duration, id, Metadata<ObjectKey_k, ProcessModel>::get(), parent}
-    , midi_in{Process::make_midi_inlet(Id<Process::Port>(0), this)}
-    , audio_out{Process::make_audio_outlet(Id<Process::Port>(0), this)}
+    , midi_in{std::make_unique<Process::MidiInlet>(
+          "MIDI In", Id<Process::Port>(0), this)}
+    , audio_out{std::make_unique<Process::AudioOutlet>(
+          "Audio Out", Id<Process::Port>(0), this)}
     , m_drumkitPath{data}
 {
   metadata().setInstanceName(*this);

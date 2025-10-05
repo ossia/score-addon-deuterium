@@ -24,8 +24,6 @@
 #include <ossia/editor/state/state.hpp>
 
 #include <QEventLoop>
-#include <QQmlComponent>
-#include <QQmlContext>
 #include <QTimer>
 
 #include <Deuterium/ProcessModel.hpp>
