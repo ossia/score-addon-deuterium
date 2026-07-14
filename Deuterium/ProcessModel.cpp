@@ -28,12 +28,12 @@ ProcessModel::ProcessModel(
     , m_drumkitPath{data}
 {
   metadata().setInstanceName(*this);
-  if(!data.contains("drumkit.xml"))
-    throw std::runtime_error("Not an Hydrogen file");
 
-  m_drumkit = parseDrumkit(data);
-  if(!m_drumkit)
-    throw std::runtime_error("Bad Hydrogen file");
+  // Only attempt to load a drumkit when we were handed a Hydrogen file. Empty
+  // or non-Hydrogen data yields a valid, silent process (no drumkit loaded)
+  // rather than failing construction.
+  if(data.contains("drumkit.xml"))
+    m_drumkit = parseDrumkit(data);
 
   m_inlets.push_back(midi_in.get());
   m_outlets.push_back(audio_out.get());
