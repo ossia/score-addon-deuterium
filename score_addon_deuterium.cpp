@@ -16,6 +16,10 @@
 #include <Deuterium/Library.hpp>
 #include <Deuterium/ProcessFactory.hpp>
 
+#include <Deuterium/GigSampler/Executor/Component.hpp>
+#include <Deuterium/GigSampler/Library.hpp>
+#include <Deuterium/GigSampler/ProcessFactory.hpp>
+
 #include <wobjectimpl.h>
 
 score_addon_deuterium::score_addon_deuterium() { }
@@ -27,11 +31,11 @@ std::vector<score::InterfaceBase*> score_addon_deuterium::factories(
 {
   return instantiate_factories<
       score::ApplicationContext,
-      FW<Process::ProcessModelFactory, Deuterium::ProcessFactory>,
+      FW<Process::ProcessModelFactory, Deuterium::ProcessFactory, Deuterium::Gig::ProcessFactory>,
       //FW<Process::LayerFactory, Deuterium::LayerFactory>,
-      FW<Library::LibraryInterface, Deuterium::LibraryHandler>,
-      FW<Process::ProcessDropHandler, Deuterium::DropHandler>,
-      FW<Execution::ProcessComponentFactory, Deuterium::Executor::ComponentFactory>>(
+      FW<Library::LibraryInterface, Deuterium::LibraryHandler, Deuterium::Gig::LibraryHandler>,
+      FW<Process::ProcessDropHandler, Deuterium::DropHandler, Deuterium::Gig::DropHandler>,
+      FW<Execution::ProcessComponentFactory, Deuterium::Executor::ComponentFactory, Deuterium::Gig::Executor::ComponentFactory>>(
       ctx, key);
 }
 
