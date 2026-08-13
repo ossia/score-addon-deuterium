@@ -1,0 +1,3 @@
+[submodule "3rdparty/libgig-modified"]
+	path = 3rdparty/libgig-modified
+	url = https://github.com/surge-synthesizer/libgig-modified.git
