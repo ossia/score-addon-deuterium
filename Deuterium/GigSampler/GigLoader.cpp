@@ -800,6 +800,9 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
       region.velHigh = velHigh;
 
       region.pitchTrack = !smp->IsUnpitched();
+      // initialAttenuation is in centibels of attenuation (0..1440)
+      region.sampleAttenuation = std::pow(
+          10.0, -std::clamp(iz->GetInitialAttenuation(pz), 0, 1440) / 200.0);
       region.sample.midiUnityNote = (uint32_t)std::clamp(
           iz->GetUnityNote() - iz->GetCoarseTune(pz), 0, 127);
       region.sample.fineTune = iz->GetFineTune(pz);
