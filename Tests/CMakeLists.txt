@@ -57,6 +57,10 @@ add_deuterium_test(Deuterium_GigLoaderTest
   "${CMAKE_CURRENT_SOURCE_DIR}/GigLoaderTest.cpp"
 )
 
+add_deuterium_test(Deuterium_SamplerEngineTest
+  "${CMAKE_CURRENT_SOURCE_DIR}/SamplerEngineTest.cpp"
+)
+
 add_deuterium_test(Deuterium_ProcessModelTest
   "${CMAKE_CURRENT_SOURCE_DIR}/ProcessModelTest.cpp"
   "${DEUTERIUM_ROOT}/Deuterium/GigSampler/ProcessModel.cpp"

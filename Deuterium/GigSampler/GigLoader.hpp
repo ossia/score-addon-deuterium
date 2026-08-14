@@ -57,6 +57,11 @@ struct GigRegion
   int chokeGroup{-1};        // regions sharing a group cut each other off
                              // (Hydrogen muteGroup, SF2 exclusiveClass,
                              //  DLS/gig KeyGroup); -1 = none
+  bool releaseTrigger{false}; // triggered on note-off instead of note-on
+  int rrIndex{-1};           // alternation index within its zone (gig
+                             // round-robin/random dimensions); -1 = none
+  int selectionAlgo{0};      // how same-zone alternatives are picked:
+                             // 0 = all/velocity, 1 = round-robin, 2 = random
 
   GigSample sample;
 };

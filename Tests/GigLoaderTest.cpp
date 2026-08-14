@@ -274,6 +274,7 @@ QString makeHydrogenKit(const QString& dirPath)
       <randomPitchFactor>0.1</randomPitchFactor>
       <applyVelocity>true</applyVelocity>
       <muteGroup>1</muteGroup>
+      <sampleSelectionAlgo>ROUND_ROBIN</sampleSelectionAlgo>
       <filterActive>true</filterActive>
       <filterCutoff>0.5</filterCutoff>
       <filterResonance>0.2</filterResonance>
@@ -700,6 +701,55 @@ private Q_SLOTS:
       QVERIFY(std::isfinite(s));
   }
 
+  // A gig round-robin dimension produces alternation indices instead of
+  // stacked duplicate regions
+  void test_gig_round_robin_dimension()
+  {
+    const auto path = tmp("rr.gig");
+    {
+      gig::File f;
+      auto data = rampData();
+      gig::Sample* smp = f.AddSample();
+      smp->Channels = 1;
+      smp->BitDepth = 16;
+      smp->FrameSize = 2;
+      smp->SamplesPerSecond = RATE;
+      smp->MIDIUnityNote = 60;
+      smp->Resize(FRAMES);
+
+      gig::Instrument* ins = f.AddInstrument();
+      ins->pInfo->Name = "RRInstr";
+      gig::Region* rgn = ins->AddRegion();
+      rgn->SetKeyRange(40, 50);
+      rgn->SetSample(smp);
+      rgn->pDimensionRegions[0]->pSample = smp;
+
+      gig::dimension_def_t def{};
+      def.dimension = gig::dimension_roundrobin;
+      def.bits = 1;
+      def.zones = 2;
+      rgn->AddDimension(&def);
+      for(uint32_t z = 0; z < rgn->DimensionRegions; z++)
+        rgn->pDimensionRegions[z]->pSample = smp;
+
+      f.Save(path.toStdString());
+      smp->SetPos(0);
+      smp->Write(data.data(), FRAMES);
+    }
+
+    auto info = loadGigFileMetadata(path);
+    QVERIFY(info);
+    auto& regions = info->instruments[0].regions;
+    QCOMPARE(regions.size(), std::size_t(2));
+    QCOMPARE(regions[0].rrIndex, 0);
+    QCOMPARE(regions[1].rrIndex, 1);
+    QCOMPARE(regions[0].selectionAlgo, 1);
+    // Same zone: identical key/velocity ranges
+    QCOMPARE(regions[0].keyLow, regions[1].keyLow);
+    QCOMPARE(regions[0].velLow, regions[1].velLow);
+    QCOMPARE(regions[0].velHigh, regions[1].velHigh);
+  }
+
   void test_hydrogen_drumkit()
   {
     const auto path = makeHydrogenKit(tmp("mykit"));
@@ -732,6 +782,8 @@ private Q_SLOTS:
     QCOMPARE(regions[0].randomPitch, 0.1);
     QCOMPARE(regions[0].chokeGroup, 1);
     QCOMPARE(regions[2].chokeGroup, -1);
+    QCOMPARE(regions[0].selectionAlgo, 1); // ROUND_ROBIN
+    QCOMPARE(regions[2].selectionAlgo, 0);
     // ADSR: Hydrogen frames at 44.1kHz -> seconds
     QCOMPARE(regions[0].eg1Decay, 1.0);
     QVERIFY(std::abs(regions[0].eg1Release - 1000.0 / 44100.0) < 1e-9);
