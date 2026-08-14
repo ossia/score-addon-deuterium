@@ -29,12 +29,16 @@ score_addon_deuterium::~score_addon_deuterium() = default;
 std::vector<score::InterfaceBase*> score_addon_deuterium::factories(
     const score::ApplicationContext& ctx, const score::InterfaceKey& key) const
 {
+  // The legacy drumkit process (Deuterium::ProcessFactory) stays registered so
+  // existing documents keep loading, but its library/drop handlers are gone:
+  // new drumkits go through the generic sampler, which plays them with the
+  // shared engine.
   return instantiate_factories<
       score::ApplicationContext,
       FW<Process::ProcessModelFactory, Deuterium::ProcessFactory, Deuterium::Gig::ProcessFactory>,
       //FW<Process::LayerFactory, Deuterium::LayerFactory>,
-      FW<Library::LibraryInterface, Deuterium::LibraryHandler, Deuterium::Gig::LibraryHandler>,
-      FW<Process::ProcessDropHandler, Deuterium::DropHandler, Deuterium::Gig::DropHandler>,
+      FW<Library::LibraryInterface, Deuterium::Gig::LibraryHandler>,
+      FW<Process::ProcessDropHandler, Deuterium::Gig::DropHandler>,
       FW<Execution::ProcessComponentFactory, Deuterium::Executor::ComponentFactory, Deuterium::Gig::Executor::ComponentFactory>>(
       ctx, key);
 }
