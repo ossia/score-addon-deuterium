@@ -12,6 +12,7 @@
 
 #include <Dataflow/AudioOutletItem.hpp>
 #include <Dataflow/MidiInletItem.hpp>
+#include <Deuterium/GigSampler/Controls.hpp>
 #include <Deuterium/GigSampler/ProcessModel.hpp>
 
 class ProcessModelTest final : public QObject
@@ -70,7 +71,7 @@ private Q_SLOTS:
 
     QCOMPARE(p.effect(), QStringLiteral("/nonexistent/dir/missing.gig"));
     QVERIFY(!p.gigInfo());
-    QCOMPARE(p.inlets().size(), std::size_t(1));
+    QCOMPARE(p.inlets().size(), std::size_t(1 + Deuterium::Gig::ControlCount));
     QCOMPARE(p.outlets().size(), std::size_t(1));
   }
 
@@ -81,7 +82,7 @@ private Q_SLOTS:
 
     QCOMPARE(p.effect(), QString{});
     QVERIFY(!p.gigInfo());
-    QCOMPARE(p.inlets().size(), std::size_t(1));
+    QCOMPARE(p.inlets().size(), std::size_t(1 + Deuterium::Gig::ControlCount));
     QCOMPARE(p.outlets().size(), std::size_t(1));
   }
 

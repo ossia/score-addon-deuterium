@@ -345,10 +345,17 @@ loadMetadata_gig(const QString& filePath, int instrumentIndex)
       region.velLow = 0;
       region.velHigh = 127;
 
-      // Determine velocity range from dimension definitions
+      // Decode the dimension zones this region sits in: velocity range,
+      // round-robin/random alternation and release triggers
       for(unsigned int dim = 0; dim < rgn->Dimensions; dim++)
       {
-        if(rgn->pDimensionDefinitions[dim].dimension == gig::dimension_velocity)
+        const auto dimType = rgn->pDimensionDefinitions[dim].dimension;
+        if(dimType != gig::dimension_velocity && dimType != gig::dimension_roundrobin
+           && dimType != gig::dimension_roundrobinkeyboard
+           && dimType != gig::dimension_random
+           && dimType != gig::dimension_releasetrigger)
+          continue;
+
         {
           int bitsBelow = 0;
           for(unsigned int dd = 0; dd < dim; dd++)
@@ -358,6 +365,25 @@ loadMetadata_gig(const QString& filePath, int instrumentIndex)
           const int mask = (1 << dimBits) - 1;
           const int zone = (d >> bitsBelow) & mask;
           const int zones = std::max<int>(1, rgn->pDimensionDefinitions[dim].zones);
+
+          if(dimType == gig::dimension_releasetrigger)
+          {
+            region.releaseTrigger = zone > 0;
+            continue;
+          }
+          if(dimType == gig::dimension_roundrobin
+             || dimType == gig::dimension_roundrobinkeyboard)
+          {
+            region.rrIndex = zone;
+            region.selectionAlgo = 1;
+            continue;
+          }
+          if(dimType == gig::dimension_random)
+          {
+            region.rrIndex = zone;
+            region.selectionAlgo = 2;
+            continue;
+          }
 
           // Per-zone upper limit: gig3 stores it in DimensionUpperLimits,
           // gig2 in VelocityUpperLimit (0 there means a uniform 128/zones
@@ -383,7 +409,6 @@ loadMetadata_gig(const QString& filePath, int instrumentIndex)
                                                   : nullptr;
             region.velLow = std::clamp(zoneUpperLimit(prev, zone - 1) + 1, 0, 127);
           }
-          break;
         }
       }
 
@@ -990,6 +1015,20 @@ loadMetadata_hydrogen(const QString& filePath, int instrumentIndex)
     if(const auto applyVel = inst.firstChildElement("applyVelocity");
        !applyVel.isNull())
       base.applyVelocity = applyVel.text() == "true";
+
+    // Hydrogen >= 1.1: how the layer within a velocity range is picked.
+    // In format v2 the element moved inside <instrumentComponent>.
+    const auto algoOf = [](const QDomElement& e) {
+      const auto t = e.text();
+      return t == QStringLiteral("ROUND_ROBIN") ? 1
+             : t == QStringLiteral("RANDOM")    ? 2
+                                                : 0;
+    };
+    if(const auto algo = inst.firstChildElement("sampleSelectionAlgo"); !algo.isNull())
+      base.selectionAlgo = algoOf(algo);
+    else if(const auto c = inst.firstChildElement("instrumentComponent"); !c.isNull())
+      if(const auto algo2 = c.firstChildElement("sampleSelectionAlgo"); !algo2.isNull())
+        base.selectionAlgo = algoOf(algo2);
 
     const double volume = xmlNumber(inst, "volume", 1.0);
     const double instGain = xmlNumber(inst, "gain", 1.0);

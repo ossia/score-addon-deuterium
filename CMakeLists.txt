@@ -36,8 +36,10 @@ set(HDRS
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/ProcessMetadata.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/ProcessModel.hpp"
 
+  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Controls.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Executor/Component.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/GigLoader.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/SamplerEngine.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessFactory.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessMetadata.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessModel.hpp"
@@ -52,6 +54,7 @@ set(SRCS
 
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/Executor/Component.cpp"
 
+  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Controls.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/GigLoader.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessModel.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessModelSerialization.cpp"

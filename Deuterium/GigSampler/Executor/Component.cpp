@@ -1,9 +1,5 @@
 #include "Component.hpp"
 
-#include <Explorer/DocumentPlugin/DeviceDocumentPlugin.hpp>
-
-#include <Scenario/Execution/score2OSSIA.hpp>
-
 #include <Execution/DocumentPlugin.hpp>
 
 #include <score/tools/Bind.hpp>
@@ -12,10 +8,9 @@
 #include <ossia/dataflow/port.hpp>
 #include <ossia/detail/ssize.hpp>
 
+#include <Deuterium/GigSampler/Controls.hpp>
 #include <Deuterium/GigSampler/ProcessModel.hpp>
-#include <DspFilters/Filter.h>
-#include <DspFilters/RBJ.h>
-#include <DspFilters/SmoothedFilter.h>
+#include <Deuterium/GigSampler/SamplerEngine.hpp>
 #include <Gamma/Envelope.h>
 #include <halp/compat/gamma.hpp>
 #include <libremidi/detail/conversion.hpp>
@@ -32,19 +27,29 @@ struct gig_voice
   const GigRegion* region{};
   gam::ADSR<double, double, halp::compat::gamma_domain> amp_adsr;
 
-  static constexpr auto chans = 2;
-  Dsp::SmoothedFilterDesign<Dsp::RBJ::Design::LowPass, chans> lowpassFilter{128};
+  Biquad filter;
+  LofiState lofi;
+  PlayHead head;
+  ResolvedLoop loop;
+  Lfo lfo;
+  PitchEnv pitchEnv;
+  BlockEnv filterEnv;
+  GlideState glide;
 
   int note{-1};
+  int velocity{};
   int64_t startOrder{};
-  // Fractional playback position: integer truncation of the per-block
-  // advance would detune pitched voices and jump backwards at block edges
-  double position{};
   bool playing{};
   bool released{};
   bool choked{};
-  double chokeGain{1.0};
-  double pitchRatio{1.0};
+  bool oneShotEff{};
+  bool filterOn{};
+  int filterTypeEff{};
+  double cutoffBaseHz{20000.};
+  double q{1.};
+  double chokeGain{1.};
+  double gain{1.};       // velocity * zone crossfade * region attenuation
+  double randomSemis{};
 };
 
 class gigsampler_node final : public ossia::graph_node
@@ -72,6 +77,12 @@ public:
 
     for(auto& v : m_voices)
       stop_voice(v);
+    m_haveLastPitch = false;
+  }
+
+  void set_control(int control, const ossia::value& v)
+  {
+    applySamplerControl(m_params, control, v);
   }
 
   [[nodiscard]] std::string label() const noexcept override { return "gigsampler"; }
@@ -83,6 +94,7 @@ public:
       if(v.playing && !v.released)
       {
         v.amp_adsr.release();
+        v.filterEnv.release();
         v.released = true;
       }
     }
@@ -96,7 +108,6 @@ public:
        || m_gigInfo->selectedInstrument >= std::ssize(m_gigInfo->instruments))
       return;
 
-    // Setup audio output
     this->audio_out->data.set_channels(2);
     for(int i = 0; i < 2; i++)
     {
@@ -110,7 +121,6 @@ public:
 
     auto& instr = m_gigInfo->instruments[m_gigInfo->selectedInstrument];
 
-    // Process MIDI input
     for(auto& mess : this->midi_in->data.messages)
     {
       uint8_t data[4];
@@ -127,55 +137,17 @@ public:
         case libremidi::message_type::NOTE_ON: {
           if(velocity == 0)
             goto note_off;
-
-          // Choke pass first, so that voices started by this same hit are
-          // never choked by their sibling layers: any group this hit triggers
-          // cuts all currently sounding voices of the group — including
-          // previous instances of the same region (hi-hat self-choke)
-          for(auto& region : instr.regions)
-          {
-            if(region.muted || region.chokeGroup < 0)
-              continue;
-            if(note < region.keyLow || note > region.keyHigh)
-              continue;
-            if(velocity < region.velLow || velocity > region.velHigh)
-              continue;
-
-            for(auto& v : m_voices)
-              if(v.playing && !v.choked && v.region
-                 && v.region->chokeGroup == region.chokeGroup)
-                v.choked = true;
-          }
-
-          // Start a voice for every region matching this note and velocity
-          for(auto& region : instr.regions)
-          {
-            if(region.muted)
-              continue;
-            if(note < region.keyLow || note > region.keyHigh)
-              continue;
-            if(velocity < region.velLow || velocity > region.velHigh)
-              continue;
-
-            start_voice(allocate_voice(), region, note, velocity);
-          }
+          note_on(instr, note, velocity);
           break;
         }
         note_off:
         case libremidi::message_type::NOTE_OFF: {
-          for(auto& voice : m_voices)
-          {
-            if(!voice.playing || voice.released)
-              continue;
-            if(voice.note != note)
-              continue;
-            // One-shot (drum) voices ignore note-off and play out
-            if(voice.region && voice.region->oneShot)
-              continue;
-
-            voice.amp_adsr.release();
-            voice.released = true;
-          }
+          note_off(instr, note);
+          break;
+        }
+        case libremidi::message_type::PITCH_BEND: {
+          const int v14 = data[1] | (data[2] << 7);
+          m_bend = (v14 - 8192) / 8192.0;
           break;
         }
         default:
@@ -187,7 +159,9 @@ public:
     double* out_l = outs[0] + timings.start_sample;
     double* out_r = outs[1] + timings.start_sample;
 
-    // Render all active voices
+    const auto& p = m_params;
+    const int64_t xfadeFrames = (int64_t)(p.loopXfade * m_sampleRate);
+
     for(auto& voice : m_voices)
     {
       if(!voice.playing || !voice.region)
@@ -200,74 +174,111 @@ public:
         continue;
 
       const int64_t totalFrames = std::ssize(sampleData[0]);
-      const double pitchRatio = voice.pitchRatio;
 
-      const bool hasLoop = region.sample.hasLoop
-                           && region.sample.loopEnd > region.sample.loopStart
-                           && (int64_t)region.sample.loopEnd <= totalFrames;
-      const int64_t loopStart = region.sample.loopStart;
-      const int64_t loopEnd = region.sample.loopEnd;
-      const int64_t loopLen = loopEnd - loopStart;
+      // ---- block-rate modulation ----
+      const double blockFrames = timings.length;
+      double lfoVal = 0.;
+      if(p.lfoDest != SamplerParams::LfoOff && p.lfoDepth > 0.f)
+        lfoVal = voice.lfo.advanceBlock(blockFrames, p.lfoRate, p.lfoDelay, m_sampleRate);
+      voice.pitchEnv.advanceBlock(blockFrames, p.pitchEnvDecay, m_sampleRate);
+      const double glideSemis = voice.glide.advanceBlock(blockFrames, p.glide, m_sampleRate);
 
-      // Anti-click fadeout near sample end (0.75ms)
+      double semis = glideSemis + voice.randomSemis + m_bend * p.bendRange
+                     + voice.pitchEnv.value;
+      if(p.lfoDest == SamplerParams::LfoPitch)
+        semis += lfoVal * p.lfoDepth * 2.0; // up to +-2 semitones of vibrato
+      const double ratio = semitonesToRatio(semis);
+
+      const double fenv = voice.filterEnv.advanceBlock(
+          blockFrames, p.filterEnvAttack, p.filterEnvDecay, p.filterEnvSustain,
+          p.filterEnvRelease, m_sampleRate);
+      if(voice.filterOn)
+      {
+        double octaves = 4.0 * p.filterEnvAmount * fenv
+                         + 2.0 * p.velToCutoff * (voice.velocity / 127.0)
+                         + p.filterKeytrack * (voice.note - 60) / 12.0;
+        if(p.lfoDest == SamplerParams::LfoCutoff)
+          octaves += lfoVal * p.lfoDepth * 4.0;
+        voice.filter.configure(
+            voice.filterTypeEff, voice.cutoffBaseHz * std::exp2(octaves), voice.q,
+            m_sampleRate);
+      }
+
+      double gainMod = 1.;
+      if(p.lfoDest == SamplerParams::LfoAmp)
+        gainMod = 1. - p.lfoDepth * 0.5 * (1. + lfoVal); // tremolo, downwards
+      double panMod = 0.;
+      if(p.lfoDest == SamplerParams::LfoPan)
+        panMod = lfoVal * p.lfoDepth;
+
+      const double pan
+          = std::clamp(region.pan / 64.0 + p.pan + panMod, -1., 1.);
+      const double panR = (pan + 1.) * 0.5;
+      const double panL = 1. - panR;
+      const double gainTotal = voice.gain * p.volume * gainMod;
+
+      // Anti-click fadeout near the end of non-looping playback
       const int64_t fadeSamples = (int64_t)(m_sampleRate * 0.00075);
-      const int64_t fadeStart = totalFrames - fadeSamples;
 
-      // Pan: -64..63 -> left/right gain
-      double panR = (region.pan + 64.0) / 127.0;
-      double panL = 1.0 - panR;
-
-      // Choked voices fade out over ~10ms instead of their release stage
       const double chokeStep
           = voice.choked ? 1.0 / std::max(1.0, m_sampleRate * 0.010) : 0.0;
 
       for(int64_t k = 0; k < timings.length; k++)
       {
-        double srcPos = voice.position + k * pitchRatio;
-        int64_t idx = (int64_t)srcPos;
-        double frac = srcPos - idx;
+        const auto sr = readPosition(
+            voice.head.pos, totalFrames, voice.loop, xfadeFrames, voice.released);
 
-        if(hasLoop && idx >= loopEnd)
-          idx = loopStart + ((idx - loopStart) % loopLen);
-
-        if(idx >= totalFrames || idx < 0)
+        double sL, sR;
         {
-          stop_voice(voice);
-          break;
+          const int64_t i0 = sr.idx;
+          const int64_t i1 = std::min(i0 + 1, totalFrames - 1);
+          if(channels == 1)
+          {
+            double s = sampleData[0][i0]
+                       + (sampleData[0][i1] - sampleData[0][i0]) * sr.frac;
+            sL = sR = s;
+          }
+          else
+          {
+            sL = sampleData[0][i0]
+                 + (sampleData[0][i1] - sampleData[0][i0]) * sr.frac;
+            sR = sampleData[1][i0]
+                 + (sampleData[1][i1] - sampleData[1][i0]) * sr.frac;
+          }
+          if(sr.xfadeWeight > 0.)
+          {
+            const double w = sr.xfadeWeight;
+            const int64_t xi = sr.xfadeIdx;
+            if(channels == 1)
+            {
+              sL = sL * (1. - w) + sampleData[0][xi] * w;
+              sR = sL;
+            }
+            else
+            {
+              sL = sL * (1. - w) + sampleData[0][xi] * w;
+              sR = sR * (1. - w) + sampleData[1][xi] * w;
+            }
+          }
         }
 
-        double sLR[2];
-        if(channels == 1)
+        // End fade only applies when playback can actually run off the end
+        if(voice.loop.mode == 0 && fadeSamples > 0)
         {
-          double s0 = sampleData[0][idx];
-          double s1 = (idx + 1 < totalFrames) ? sampleData[0][idx + 1] : s0;
-          double s = s0 + (s1 - s0) * frac;
-          sLR[0] = s;
-          sLR[1] = s;
-        }
-        else
-        {
-          double s0l = sampleData[0][idx];
-          double s1l = (idx + 1 < totalFrames) ? sampleData[0][idx + 1] : s0l;
-          double s0r = sampleData[1][idx];
-          double s1r = (idx + 1 < totalFrames) ? sampleData[1][idx + 1] : s0r;
-          sLR[0] = s0l + (s1l - s0l) * frac;
-          sLR[1] = s0r + (s1r - s0r) * frac;
+          const int64_t remaining = voice.head.dir > 0
+                                        ? totalFrames - sr.idx
+                                        : sr.idx + 1;
+          if(remaining < fadeSamples)
+          {
+            const double g = (double)remaining / (double)fadeSamples;
+            sL *= g;
+            sR *= g;
+          }
         }
 
-        // Anti-click fadeout near sample end
-        if(!hasLoop && idx >= fadeStart && fadeSamples > 0)
-        {
-          double fadeGain = (double)(totalFrames - idx) / (double)fadeSamples;
-          sLR[0] *= fadeGain;
-          sLR[1] *= fadeGain;
-        }
-
-        if(region.vcfEnabled)
-        {
-          double* parr[2] = {&sLR[0], &sLR[1]};
-          voice.lowpassFilter.process(1, parr);
-        }
+        if(voice.filterOn)
+          voice.filter.process(sL, sR);
+        voice.lofi.process(p.lofi, sL, sR);
 
         double aenv = voice.amp_adsr();
         if(voice.choked)
@@ -280,93 +291,295 @@ public:
             break;
           }
         }
-        out_l[k] += sLR[0] * aenv * panL;
-        out_r[k] += sLR[1] * aenv * panR;
+
+        out_l[k] += sL * aenv * gainTotal * panL;
+        out_r[k] += sR * aenv * gainTotal * panR;
+
+        if(!voice.head.advance(ratio, voice.loop, totalFrames, voice.released))
+        {
+          stop_voice(voice);
+          break;
+        }
       }
 
-      if(!voice.playing)
-        continue;
-
-      voice.position += timings.length * pitchRatio;
-
-      // Keep the play position bounded while looping
-      if(hasLoop && voice.position >= (double)loopEnd)
-        voice.position
-            = loopStart + std::fmod(voice.position - loopStart, (double)loopLen);
-
-      // Check if voice finished
-      if(voice.amp_adsr.done())
+      if(voice.playing && voice.amp_adsr.done())
         stop_voice(voice);
     }
   }
 
 private:
+  void note_on(GigInstrument& instr, int note, int velocity) noexcept
+  {
+    const auto& p = m_params;
+    m_noteVelocity[note & 127] = (uint8_t)velocity;
+
+    const int regionCount = std::min<int>(instr.regions.size(), 512);
+
+    // 1. chokes: any group this hit triggers cuts what currently sounds in it
+    for(int i = 0; i < regionCount; i++)
+    {
+      auto& region = instr.regions[i];
+      if(region.muted || region.releaseTrigger || region.chokeGroup < 0)
+        continue;
+      if(!regionMatches(region, note, velocity))
+        continue;
+      for(auto& v : m_voices)
+        if(v.playing && !v.choked && v.region
+           && v.region->chokeGroup == region.chokeGroup)
+          v.choked = true;
+    }
+
+    // 2. mono / legato handling for melodic content
+    const bool monoish = p.voiceMode != SamplerParams::Poly;
+    if(monoish)
+    {
+      bool retargeted = false;
+      if(p.voiceMode == SamplerParams::Legato)
+      {
+        for(auto& v : m_voices)
+        {
+          if(v.playing && !v.released && !v.choked && v.region
+             && v.region->pitchTrack && note >= v.region->keyLow
+             && note <= v.region->keyHigh)
+          {
+            // Same zone still held: just glide there, no retrigger
+            const double target = basePitchSemitones(*v.region, p, note);
+            v.glide.start(v.glide.current, target, true);
+            v.note = note;
+            m_lastPitchSemis = target;
+            m_haveLastPitch = true;
+            retargeted = true;
+          }
+        }
+      }
+      else
+      {
+        for(auto& v : m_voices)
+          if(v.playing && !v.choked && v.region && v.region->pitchTrack)
+            v.choked = true;
+      }
+      if(retargeted)
+        return;
+    }
+
+    // 3. zone matching with round-robin/random alternation.
+    // Alternatives share the exact same key and velocity zone.
+    bool used[512]{};
+    for(int i = 0; i < regionCount; i++)
+    {
+      if(used[i])
+        continue;
+      auto& region = instr.regions[i];
+      if(region.muted || region.releaseTrigger)
+        continue;
+      if(!regionMatches(region, note, velocity))
+        continue;
+
+      int group[32];
+      int groupSize = 0;
+      for(int j = i; j < regionCount && groupSize < 32; j++)
+      {
+        if(used[j])
+          continue;
+        auto& other = instr.regions[j];
+        if(other.muted || other.releaseTrigger)
+          continue;
+        if(other.keyLow == region.keyLow && other.keyHigh == region.keyHigh
+           && other.velLow == region.velLow && other.velHigh == region.velHigh)
+        {
+          used[j] = true;
+          group[groupSize++] = j;
+        }
+      }
+
+      int policy = 0;
+      switch(p.roundRobin)
+      {
+        case SamplerParams::RRFromFile:
+          policy = region.selectionAlgo == 1   ? SamplerParams::RRCycle
+                   : region.selectionAlgo == 2 ? SamplerParams::RRRandom
+                                               : 0;
+          break;
+        case SamplerParams::RROff:
+          policy = 0;
+          break;
+        case SamplerParams::RRCycle:
+          policy = groupSize > 1 ? SamplerParams::RRCycle : 0;
+          break;
+        case SamplerParams::RRRandom:
+          policy = groupSize > 1 ? SamplerParams::RRRandom : 0;
+          break;
+      }
+
+      if(policy == 0)
+      {
+        for(int g = 0; g < groupSize; g++)
+          start_voice(instr.regions[group[g]], note, velocity, false);
+      }
+      else
+      {
+        const int pick
+            = pickAlternative(groupSize, policy, m_rrCounter[note & 127], m_rngState);
+        start_voice(instr.regions[group[pick]], note, velocity, false);
+      }
+    }
+  }
+
+  void note_off(GigInstrument& instr, int note) noexcept
+  {
+    for(auto& voice : m_voices)
+    {
+      if(!voice.playing || voice.released)
+        continue;
+      if(voice.note != note)
+        continue;
+      if(voice.oneShotEff)
+        continue;
+
+      voice.amp_adsr.release();
+      voice.filterEnv.release();
+      voice.released = true;
+    }
+
+    // Release triggers: dedicated regions fired on note-off (gig)
+    const int velocity = m_noteVelocity[note & 127];
+    for(auto& region : instr.regions)
+    {
+      if(!region.releaseTrigger || region.muted)
+        continue;
+      if(!regionMatches(region, note, velocity))
+        continue;
+      start_voice(region, note, velocity, true);
+    }
+  }
+
+  bool regionMatches(const GigRegion& r, int note, int velocity) const noexcept
+  {
+    if(note < r.keyLow || note > r.keyHigh)
+      return false;
+    return velocityZoneGain(r, velocity, m_params.velXfade) > 0.;
+  }
+
   gig_voice& allocate_voice() noexcept
   {
+    const int cap = std::clamp(m_params.polyphony, 1, max_voices);
+    int active = 0;
     for(auto& v : m_voices)
-      if(!v.playing)
-        return v;
+      if(v.playing)
+        active++;
 
-    // All voices busy: steal the oldest one
+    if(active < cap)
+      for(auto& v : m_voices)
+        if(!v.playing)
+          return v;
+
+    // At the cap (or full pool): steal the oldest voice
     gig_voice* oldest = &m_voices[0];
     for(auto& v : m_voices)
-      if(v.startOrder < oldest->startOrder)
+      if(v.playing && v.startOrder < oldest->startOrder)
         oldest = &v;
     return *oldest;
   }
 
   void start_voice(
-      gig_voice& voice, const GigRegion& region, int note, int velocity) noexcept
+      const GigRegion& region, int note, int velocity, bool fromRelease) noexcept
   {
+    auto& sampleData = region.sample.data;
+    if(sampleData.empty() || sampleData[0].empty())
+      return;
+    const int64_t frames = std::ssize(sampleData[0]);
+    const auto& p = m_params;
+
+    auto& voice = allocate_voice();
     voice.region = &region;
     voice.note = note;
+    voice.velocity = velocity;
     voice.startOrder = m_voiceCounter++;
     voice.playing = true;
     voice.released = false;
     voice.choked = false;
     voice.chokeGain = 1.0;
-    voice.position = region.sampleStartOffset;
+    voice.oneShotEff = region.oneShot || fromRelease;
 
-    // Compute pitch ratio: key tracking + fine tune + constant offset
-    // + per-hit random
-    double semitones = region.pitchOffset + region.sample.fineTune / 100.0;
+    // Pitch: static part + glide start; live modulation comes per block
+    const double base = basePitchSemitones(region, p, note);
+    voice.randomSemis = region.randomPitch > 0
+                            ? region.randomPitch * (2.0 * random01() - 1.0)
+                            : 0.;
+    const bool glideOn = p.voiceMode != SamplerParams::Poly && p.glide > 0.f
+                         && region.pitchTrack && m_haveLastPitch;
+    voice.glide.start(glideOn ? m_lastPitchSemis : base, base, glideOn);
     if(region.pitchTrack)
-      semitones += note - (int)region.sample.midiUnityNote;
-    if(region.randomPitch > 0)
-      semitones += region.randomPitch * (2.0 * random01() - 1.0);
-    voice.pitchRatio = std::pow(2.0, semitones / 12.0);
-
-    // Velocity-scaled attenuation
-    const double velGain = region.applyVelocity ? velocity / 127.0 : 1.0;
-
-    // libgig reports envelope stage lengths in seconds, which is also what
-    // gam::ADSR expects; only enforce a small minimum to avoid clicks.
-    voice.amp_adsr.reset();
-    voice.amp_adsr.set_sample_rate(m_sampleRate);
-    voice.amp_adsr.attack(std::max(0.001, region.eg1Attack));
-    voice.amp_adsr.decay(std::max(0.001, region.eg1Decay));
-    voice.amp_adsr.sustain(region.eg1Sustain);
-    voice.amp_adsr.release(std::max(0.005, region.eg1Release));
-    voice.amp_adsr.amp(region.sampleAttenuation * velGain);
-
-    Dsp::Params params;
-    params[0] = m_sampleRate;
-    if(region.vcfEnabled)
     {
-      // VCF cutoff is 0-127, map to frequency
-      double freq = 20.0 * std::pow(1000.0, region.vcfCutoff / 127.0);
-      freq = std::clamp(freq, 20.0, 20000.0);
-      double q = 1.0 + region.vcfResonance * 9.0 / 127.0;
-      params[1] = freq;
-      params[2] = q;
+      m_lastPitchSemis = base;
+      m_haveLastPitch = true;
+    }
+    voice.pitchEnv.value = 0.;
+    if(p.pitchEnvAmount != 0.f)
+      voice.pitchEnv.trigger(p.pitchEnvAmount);
+
+    // Start position: region offset + global/velocity start offset
+    const double startFrac = std::clamp(
+        p.startOffset + p.velToStart * (1.0 - velocity / 127.0), 0., 0.95);
+    int64_t startFrames
+        = region.sampleStartOffset + (int64_t)(startFrac * frames);
+    startFrames = std::clamp<int64_t>(startFrames, 0, frames - 1);
+    if(p.reverse)
+    {
+      voice.head.pos = (double)(frames - 1 - startFrames);
+      voice.head.dir = -1;
     }
     else
     {
-      params[1] = 20000.;
-      params[2] = 1.;
+      voice.head.pos = (double)startFrames;
+      voice.head.dir = 1;
     }
-    voice.lowpassFilter.setParams(params);
-    voice.lowpassFilter.reset();
+
+    voice.loop = resolveLoop(region, p, frames);
+
+    // Gain: velocity curve, zone crossfade, region attenuation
+    voice.gain = region.sampleAttenuation * velocityGain(region, p, velocity)
+                 * velocityZoneGain(region, velocity, p.velXfade);
+
+    // Amplitude envelope (per-sample); global override wins
+    const auto env = resolveEnvelope(region, p);
+    voice.amp_adsr.reset();
+    voice.amp_adsr.set_sample_rate(m_sampleRate);
+    voice.amp_adsr.attack(std::max(0.001, env.attack));
+    voice.amp_adsr.decay(std::max(0.001, env.decay));
+    voice.amp_adsr.sustain(env.sustain);
+    voice.amp_adsr.release(std::max(0.005, env.release));
+    voice.amp_adsr.amp(1.0);
+
+    // Filter
+    voice.filter.reset();
+    switch(p.filterType)
+    {
+      case SamplerParams::FilterFromFile:
+        voice.filterOn = region.vcfEnabled;
+        voice.filterTypeEff = SamplerParams::FilterLowpass;
+        voice.cutoffBaseHz
+            = 20.0 * std::pow(1000.0, region.vcfCutoff / 127.0);
+        voice.q = 1.0 + region.vcfResonance * 9.0 / 127.0;
+        break;
+      case SamplerParams::FilterOff:
+        voice.filterOn = false;
+        break;
+      default:
+        voice.filterOn = true;
+        voice.filterTypeEff = p.filterType;
+        voice.cutoffBaseHz = p.cutoff;
+        voice.q = 0.5 + p.resonance * 9.5;
+        break;
+    }
+    if(voice.filterOn)
+      voice.filter.configure(
+          voice.filterTypeEff, voice.cutoffBaseHz, voice.q, m_sampleRate);
+
+    voice.filterEnv = {};
+    voice.filterEnv.trigger();
+    voice.lfo = {};
+    voice.lofi = {};
   }
 
   // xorshift32: cheap allocation-free RNG for per-hit humanization
@@ -382,11 +595,11 @@ private:
   {
     voice.region = nullptr;
     voice.note = -1;
-    voice.position = 0;
     voice.playing = false;
     voice.released = false;
     voice.choked = false;
     voice.chokeGain = 1.0;
+    voice.head = {};
   }
 
 public:
@@ -395,9 +608,15 @@ public:
   ossia::midi_inlet* midi_in{};
   ossia::audio_outlet* audio_out{};
   std::vector<gig_voice> m_voices;
+  SamplerParams m_params;
   double m_sampleRate{48000.0};
+  double m_bend{};
+  double m_lastPitchSemis{};
+  bool m_haveLastPitch{};
   int64_t m_voiceCounter{};
   uint32_t m_rngState{0x9E3779B9};
+  uint8_t m_rrCounter[128]{};
+  uint8_t m_noteVelocity[128]{};
 };
 
 Component::Component(
@@ -415,6 +634,21 @@ Component::Component(
   this->node = node;
 
   m_ossia_process = std::make_shared<ossia::node_process>(node);
+
+  // Control inlets: initial values now, updates through the command queue
+  const auto& inlets = proc.inlets();
+  for(int i = 0; i < ControlCount && 1 + i < std::ssize(inlets); i++)
+  {
+    auto* ctl = qobject_cast<Process::ControlInlet*>(inlets[1 + i]);
+    if(!ctl)
+      continue;
+    node->set_control(i, ctl->value());
+    connect(
+        ctl, &Process::ControlInlet::valueChanged, this,
+        [this, node, i](const ossia::value& v) {
+      in_exec([node, i, v] { node->set_control(i, v); });
+    });
+  }
 
   connect(&proc, &Deuterium::Gig::ProcessModel::fileChanged, this, [this, node] {
     // gi may be null (load failed): reload with an empty file to stop playback

@@ -10,6 +10,7 @@
 #include <QMetaObject>
 #include <QPointer>
 
+#include <Deuterium/GigSampler/Controls.hpp>
 #include <Deuterium/GigSampler/GigLoader.hpp>
 #include <Deuterium/GigSampler/ProcessMetadata.hpp>
 
@@ -31,6 +32,8 @@ ProcessModel::ProcessModel(
   metadata().setInstanceName(*this);
 
   m_inlets.push_back(midi_in.get());
+  for(auto* control : makeSamplerControls(this))
+    m_inlets.push_back(control);
   m_outlets.push_back(audio_out.get());
   ((Process::AudioOutlet*)audio_out.get())->setPropagate(true);
 
