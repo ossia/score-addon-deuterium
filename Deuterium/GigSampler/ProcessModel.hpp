@@ -34,7 +34,10 @@ public:
   ~ProcessModel() override;
 
   QString effect() const noexcept override;
-  void loadFile(const QString& path);
+  // Accepts a plain path or the "<path>|<instrument>" creation string
+  void loadFile(const QString& data);
+  void loadFile(const QString& path, int instrument);
+  int instrument() const noexcept { return m_instrument; }
   void fileChanged() W_SIGNAL(fileChanged)
 
   std::shared_ptr<GigFileInfo> gigInfo() const noexcept { return m_gigInfo; }
@@ -46,8 +49,21 @@ private:
   void startAsyncSampleLoad();
 
   QString m_filePath;
+  int m_instrument{};
   std::shared_ptr<GigFileInfo> m_gigInfo;
   std::shared_ptr<std::atomic<bool>> m_cancelToken;
 };
 
 }
+
+// Declared here so that every translation unit - in particular unity builds
+// merging a user of the serialization with ProcessModelSerialization.cpp -
+// sees the explicit specializations before any implicit instantiation.
+template <>
+void DataStreamReader::read(const Deuterium::Gig::ProcessModel& proc);
+template <>
+void DataStreamWriter::write(Deuterium::Gig::ProcessModel& proc);
+template <>
+void JSONReader::read(const Deuterium::Gig::ProcessModel& proc);
+template <>
+void JSONWriter::write(Deuterium::Gig::ProcessModel& proc);

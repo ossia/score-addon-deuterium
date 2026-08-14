@@ -27,21 +27,28 @@ ProcessModel::ProcessModel(
     , midi_in{std::make_unique<Process::MidiInlet>("MIDI In", Id<Process::Port>(0), this)}
     , audio_out{std::make_unique<Process::AudioOutlet>(
           "Audio Out", Id<Process::Port>(0), this)}
-    , m_filePath{data}
 {
   metadata().setInstanceName(*this);
-
-  // Phase 1: fast metadata parse on the GUI thread
-  m_gigInfo = loadGigFileMetadata(data);
-  if(!m_gigInfo)
-    throw std::runtime_error("Could not load GIG/DLS/SF2 file");
 
   m_inlets.push_back(midi_in.get());
   m_outlets.push_back(audio_out.get());
   ((Process::AudioOutlet*)audio_out.get())->setPropagate(true);
 
-  // Phase 2: async sample loading on worker thread
-  startAsyncSampleLoad();
+  // Empty or unparseable data yields a valid, silent process (no file loaded)
+  // rather than failing construction; the path is kept so that saving the
+  // document does not lose the reference.
+  const auto parsed = parseInstrumentPath(data);
+  m_filePath = parsed.file;
+  m_instrument = parsed.instrument;
+  if(!m_filePath.isEmpty())
+  {
+    // Phase 1: fast metadata parse on the GUI thread
+    m_gigInfo = loadGigFileMetadata(m_filePath, m_instrument);
+
+    // Phase 2: async sample loading on worker thread
+    if(m_gigInfo)
+      startAsyncSampleLoad();
+  }
 }
 
 ProcessModel::~ProcessModel()
@@ -56,21 +63,39 @@ QString ProcessModel::effect() const noexcept
   return m_filePath;
 }
 
-void ProcessModel::loadFile(const QString& path)
+void ProcessModel::loadFile(const QString& data)
+{
+  const auto parsed = parseInstrumentPath(data);
+  loadFile(parsed.file, parsed.instrument);
+}
+
+void ProcessModel::loadFile(const QString& path, int instrument)
 {
   // Cancel any in-flight loading
   if(m_cancelToken)
     m_cancelToken->store(true, std::memory_order_relaxed);
 
-  // Phase 1: fast metadata parse
-  auto info = loadGigFileMetadata(path);
-  if(info)
-  {
-    m_gigInfo = info;
-    m_filePath = path;
+  // Keep the path even when loading fails (missing file, unmounted drive...)
+  // so that re-saving the document does not erase the reference.
+  m_filePath = path;
+  m_instrument = instrument;
+  m_gigInfo.reset();
 
-    // Phase 2: async sample loading
+  if(!path.isEmpty())
+  {
+    // Phase 1: fast metadata parse
+    m_gigInfo = loadGigFileMetadata(path, instrument);
+  }
+
+  if(m_gigInfo)
+  {
+    // Phase 2: async sample loading; fileChanged() is emitted once samples land
     startAsyncSampleLoad();
+  }
+  else
+  {
+    // Loading failed: notify so any executor stops playing stale data
+    fileChanged();
   }
 }
 
@@ -94,19 +119,12 @@ void ProcessModel::startAsyncSampleLoad()
         auto loaded = loadGigFileSamples(metadataSnapshot, rate, cancelToken);
 
         if(cancelToken->load(std::memory_order_relaxed))
-        {
-          qWarning() << "GigSampler: load cancelled";
           return;
-        }
-
-        if(!loaded)
-        {
-          qWarning() << "GigSampler: loadGigFileSamples returned null!";
-          return;
-        }
 
         // Signal back to GUI thread via QCoreApplication context.
         // The QPointer 'self' is only dereferenced on the GUI thread.
+        // On failure, fileChanged() is still emitted so that the executor
+        // stops playing the previous file's samples.
         QMetaObject::invokeMethod(
             qApp,
             [cancelToken, self, loaded = std::move(loaded)]() mutable {
@@ -115,20 +133,8 @@ void ProcessModel::startAsyncSampleLoad()
               if(!self)
                 return;
 
-              auto& instr = loaded->instruments[loaded->selectedInstrument];
-              qWarning() << "GigSampler: GUI callback firing."
-                         << "instrument:" << instr.name.c_str()
-                         << "regions:" << instr.regions.size();
-              if(!instr.regions.empty())
-              {
-                auto& r = instr.regions[0];
-                qWarning() << "  first region: key" << r.keyLow << "-" << r.keyHigh
-                           << "sample channels:" << r.sample.data.size()
-                           << "frames:"
-                           << (r.sample.data.empty() ? 0 : (int)r.sample.data[0].size());
-              }
-
-              self->m_gigInfo = std::move(loaded);
+              if(loaded)
+                self->m_gigInfo = std::move(loaded);
               self->fileChanged();
             },
             Qt::QueuedConnection);

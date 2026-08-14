@@ -14,7 +14,7 @@
 template <>
 void DataStreamReader::read(const Deuterium::Gig::ProcessModel& proc)
 {
-  m_stream << proc.m_filePath;
+  m_stream << proc.m_filePath << proc.m_instrument;
   readPorts(*this, proc.m_inlets, proc.m_outlets);
 
   insertDelimiter();
@@ -24,12 +24,13 @@ template <>
 void DataStreamWriter::write(Deuterium::Gig::ProcessModel& proc)
 {
   QString filePath;
-  m_stream >> filePath;
+  int instrument{};
+  m_stream >> filePath >> instrument;
   writePorts(
       *this, components.interfaces<Process::PortFactoryList>(), proc.m_inlets,
       proc.m_outlets, &proc);
 
-  proc.loadFile(filePath);
+  proc.loadFile(filePath, instrument);
   checkDelimiter();
 }
 
@@ -37,6 +38,7 @@ template <>
 void JSONReader::read(const Deuterium::Gig::ProcessModel& proc)
 {
   obj["File"] = proc.m_filePath;
+  obj["Instrument"] = proc.m_instrument;
   readPorts(*this, proc.m_inlets, proc.m_outlets);
 }
 
@@ -44,7 +46,10 @@ template <>
 void JSONWriter::write(Deuterium::Gig::ProcessModel& proc)
 {
   QString filePath = obj["File"].toString();
-  proc.loadFile(filePath);
+  int instrument{};
+  if(auto v = obj.tryGet("Instrument"))
+    instrument = v->toInt();
+  proc.loadFile(filePath, instrument);
   writePorts(
       *this, components.interfaces<Process::PortFactoryList>(), proc.m_inlets,
       proc.m_outlets, &proc);
