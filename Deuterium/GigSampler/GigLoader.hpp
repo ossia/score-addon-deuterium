@@ -12,9 +12,12 @@ namespace Deuterium::Gig
 struct GigSample
 {
   ossia::audio_array data;
+  // For samples stored outside the bank file (e.g. Hydrogen drumkit layers):
+  // absolute path of the audio file to decode in phase 2
+  std::string sourceFile;
   uint32_t sampleRate{44100};
   uint32_t midiUnityNote{60};
-  uint32_t fineTune{0};
+  int32_t fineTune{0}; // cents
   bool hasLoop{false};
   uint32_t loopStart{0};
   uint32_t loopEnd{0};
@@ -45,6 +48,16 @@ struct GigRegion
   double sampleAttenuation{1.0};
   uint16_t sampleStartOffset{0};
 
+  // Drum-style behavior (Hydrogen kits; also expressible by other formats)
+  bool oneShot{false};       // ignore note-off, play until the sample ends
+  bool muted{false};         // region loaded but never triggered
+  bool applyVelocity{true};  // velocity scales the gain
+  double pitchOffset{0.0};   // constant pitch offset, in semitones
+  double randomPitch{0.0};   // per-hit random pitch, +/- this many semitones
+  int chokeGroup{-1};        // regions sharing a group cut each other off
+                             // (Hydrogen muteGroup, SF2 exclusiveClass,
+                             //  DLS/gig KeyGroup); -1 = none
+
   GigSample sample;
 };
 
@@ -64,6 +77,24 @@ struct GigFileInfo
   int selectedInstrument{0};
 };
 
+// The process customData is either a plain file path, or
+// "<path>|<instrument index>" to select a specific instrument (gig/dls) or
+// preset (sf2) of a multi-instrument file.
+struct ParsedInstrumentPath
+{
+  QString file;
+  int instrument{0};
+};
+ParsedInstrumentPath parseInstrumentPath(const QString& data);
+
+// Lists the names of all instruments (gig/dls) or presets (sf2) of a file,
+// without loading any sample data. Returns an empty list on error.
+std::vector<std::string> listInstruments(const QString& filePath);
+
+// Human-readable format family of a sample file, determined by content
+// sniffing with the extension as fallback: "GIG", "DLS", "SF2" or "Drumkit".
+QString formatName(const QString& filePath);
+
 // Phase 1: Fast metadata parse (GUI-safe).
 // Returns a GigFileInfo with all region/instrument metadata populated
 // but with empty sample data arrays.
@@ -77,6 +108,6 @@ loadGigFileMetadata(const QString& filePath, int instrumentIndex = 0);
 std::shared_ptr<GigFileInfo> loadGigFileSamples(
     const std::shared_ptr<GigFileInfo>& metadata,
     int targetRate,
-    std::shared_ptr<std::atomic<bool>> cancelled);
+    const std::shared_ptr<std::atomic<bool>>& cancelled);
 
 }
