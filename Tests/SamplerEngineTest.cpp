@@ -97,6 +97,22 @@ TEST_CASE("engine: velocity_zone_crossfade", "[deuterium]")
   REQUIRE(approxEq(velocityZoneGain(r, 0, 1.), 0.));
 }
 
+TEST_CASE("engine: vel_to_pitch_env_scale", "[deuterium]")
+{
+  // 0 = no scaling
+  REQUIRE(approxEq(velPitchEnvScale(0., 1), 1.0));
+  REQUIRE(approxEq(velPitchEnvScale(0., 127), 1.0));
+  // +1: full amount at max velocity, nothing at velocity 0
+  REQUIRE(approxEq(velPitchEnvScale(1., 127), 1.0));
+  REQUIRE(approxEq(velPitchEnvScale(1., 0), 0.0));
+  REQUIRE(std::abs(velPitchEnvScale(1., 64) - 64. / 127.) < 1e-9);
+  // -1: inverse - soft hits get the full amount
+  REQUIRE(approxEq(velPitchEnvScale(-1., 0), 1.0));
+  REQUIRE(approxEq(velPitchEnvScale(-1., 127), 0.0));
+  // Half strength never scales below 0.5
+  REQUIRE((velPitchEnvScale(0.5, 0) >= 0.5));
+}
+
 TEST_CASE("engine: amp_env_db_mode", "[deuterium]")
 {
   constexpr double rate = 48000.;

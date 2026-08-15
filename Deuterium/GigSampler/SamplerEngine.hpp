@@ -81,7 +81,10 @@ struct SamplerParams
 
   float lofi{0.f}; // 0..1: one-knob rate + bit-depth reduction
 
-  float pitchEnvAmount{0.f};  // semitones, bipolar
+  float pitchEnvAmount{0.f};
+  // Velocity scaling of the pitch envelope amount: 0 = none, towards +1 hard
+  // hits get the full amount and soft hits less, towards -1 the inverse
+  float velToPitchEnv{0.f};
   float pitchEnvDecay{0.08f}; // seconds
 
   enum LfoDest
@@ -341,6 +344,17 @@ private:
   Stage m_stage{Done};
   bool m_dbMode{false};
 };
+
+// lerp(1, vel/127, k) for k in [0,1]; lerp(1, 1 - vel/127, -k) for k < 0
+inline double velPitchEnvScale(double velToPitchEnv, int velocity) noexcept
+{
+  const double v = std::clamp(velocity, 0, 127) / 127.0;
+  if(velToPitchEnv > 0.)
+    return 1. + velToPitchEnv * (v - 1.);
+  if(velToPitchEnv < 0.)
+    return 1. + -velToPitchEnv * (-v);
+  return 1.;
+}
 
 // Amplitude envelope resolution: the global override wins when set (>= 0)
 struct ResolvedEnv

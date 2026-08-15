@@ -729,7 +729,8 @@ private:
     }
     voice.pitchEnv.value = 0.;
     if(p.pitchEnvAmount != 0.f)
-      voice.pitchEnv.trigger(p.pitchEnvAmount);
+      voice.pitchEnv.trigger(
+          p.pitchEnvAmount * velPitchEnvScale(p.velToPitchEnv, effVel));
 
     // Start position: region offset + global/velocity start offset
     const double startFrac = std::clamp(

@@ -275,7 +275,10 @@ private:
       auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
       page->setBrush(skin.Background2.main);
       b.grid(page, 5, {EnvFromFile, Attack, Decay, Sustain, Release});
-      b.grid(page, 5, {VelAmount, VelCurve, VelXfade, PitchEnvAmount, PitchEnvDecay});
+      b.grid(
+          page, 6,
+          {VelAmount, VelCurve, VelXfade, PitchEnvAmount, PitchEnvDecay,
+           VelToPitchEnv});
     }
     {
       auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
