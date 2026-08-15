@@ -122,6 +122,10 @@ struct GigRegion
   int selectionAlgo{0};      // how same-zone alternatives are picked:
                              // 0 = all/velocity, 1 = round-robin, 2 = random
 
+  // Display name of the sound, for formats that have one (Hydrogen drum
+  // names); shown on the trigger pads
+  std::string noteLabel;
+
   // Precomputed alternation grouping (regions sharing the exact same key and
   // velocity zone), so the audio thread never has to group; see
   // assignAlternationGroups()

@@ -13,6 +13,8 @@
 #include <QGraphicsSceneMouseEvent>
 #include <QPainter>
 
+#include <QHash>
+
 #include <bitset>
 #include <functional>
 #include <vector>
@@ -39,10 +41,13 @@ public:
 
   ~KeyboardItem() { releaseCurrent(); }
 
-  void setMapped(const std::bitset<128>& mapped, bool preferPads)
+  void setMapped(
+      const std::bitset<128>& mapped, bool preferPads,
+      QHash<int, QString> names = {})
   {
     prepareGeometryChange();
     m_mapped = mapped;
+    m_names = std::move(names);
     m_pads.clear();
     int lo = 128, hi = -1;
     for(int i = 0; i < 128; i++)
@@ -73,11 +78,41 @@ public:
     return {0., 0., width(), header_h + bodyHeight()};
   }
 
+  // Panel width the pads may occupy: rows wrap at this width and the pad
+  // size stretches so each full row spans it exactly
+  void setAvailableWidth(double w)
+  {
+    prepareGeometryChange();
+    m_availW = std::max(120., w);
+    update();
+  }
+
 private:
   static constexpr double header_h = 12.;
-  static constexpr double key_w = 7., key_h = 34., black_h = 20.;
-  static constexpr double pad_w = 26., pad_h = 22., pad_gap = 2.;
-  static constexpr int pads_per_row = 14;
+  static constexpr double key_w = 7., key_h = 34., black_h = 20., label_h = 8.;
+  static constexpr double pad_gap = 2.;
+
+  // Pads fill the available width: rows wrap when full, and the pad width
+  // stretches so a full row spans the panel exactly. Named pads (drum kits)
+  // aim wider so the sound name stays readable.
+  double padTarget() const noexcept { return m_names.isEmpty() ? 26. : 52.; }
+  int padsPerRow() const noexcept
+  {
+    const int fit
+        = (int)std::floor((m_availW - pad_gap) / (padTarget() + pad_gap));
+    const int n = std::max<int>(1, (int)m_pads.size());
+    return std::clamp(fit, 1, n);
+  }
+  double padW() const noexcept
+  {
+    const int perRow = padsPerRow();
+    return std::clamp(
+        (m_availW - (perRow + 1) * pad_gap) / perRow, 10., padTarget() * 1.6);
+  }
+  double padH() const noexcept
+  {
+    return std::min(m_names.isEmpty() ? 22. : 26., padW());
+  }
 
   static bool isBlack(int note) noexcept
   {
@@ -114,9 +149,7 @@ private:
   double width() const noexcept
   {
     if(m_mode == Mode::Pads)
-      return std::min<int>(pads_per_row, std::max<std::size_t>(1, m_pads.size()))
-                 * (pad_w + pad_gap)
-             + pad_gap;
+      return m_availW;
     return keysWidth();
   }
 
@@ -124,11 +157,12 @@ private:
   {
     if(m_mode == Mode::Pads)
     {
+      const int perRow = padsPerRow();
       const int rows
-          = m_pads.empty() ? 1 : int((m_pads.size() + pads_per_row - 1) / pads_per_row);
-      return rows * (pad_h + pad_gap) + pad_gap;
+          = m_pads.empty() ? 1 : int((m_pads.size() + perRow - 1) / perRow);
+      return rows * (padH() + pad_gap) + pad_gap;
     }
-    return key_h;
+    return key_h + label_h;
   }
 
   // The white-key rect of a note, or the black-key rect for sharps
@@ -145,56 +179,80 @@ private:
 
   QRectF padRect(std::size_t i) const noexcept
   {
-    const int col = int(i % pads_per_row), row = int(i / pads_per_row);
+    const int perRow = padsPerRow();
+    const int col = int(i % perRow), row = int(i / perRow);
+    const double w = padW(), h = padH();
     return {
-        pad_gap + col * (pad_w + pad_gap), header_h + pad_gap + row * (pad_h + pad_gap),
-        pad_w, pad_h};
+        pad_gap + col * (w + pad_gap), header_h + pad_gap + row * (h + pad_gap), w, h};
   }
 
-  QRectF modeToggleRect() const noexcept { return {width() - 38., 0., 38., header_h}; }
+  // Flush-left mode selector, styled like the Enum widgets (clickable text)
+  QRectF keysToggleRect() const noexcept { return {0., 0., 30., header_h}; }
+  QRectF padsToggleRect() const noexcept { return {32., 0., 30., header_h}; }
 
   void paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*) override
   {
     auto& skin = score::Skin::instance();
     p->setRenderHint(QPainter::Antialiasing, false);
 
-    // Header: mode toggle at the right
-    p->setFont(skin.Medium8Pt);
-    p->setPen(skin.Base4.lighter180.pen1);
+    // Header: flush-left mode selector styled like the Enum widgets
+    p->setFont(skin.MonoFontSmall);
+    p->setPen(m_mode == Mode::Keys ? skin.Base4.main.pen1 : skin.Gray.main.pen1);
     p->drawText(
-        modeToggleRect(), m_mode == Mode::Keys ? QStringLiteral("▸ pads")
-                                               : QStringLiteral("▸ keys"),
-        QTextOption(Qt::AlignRight | Qt::AlignVCenter));
+        keysToggleRect(), QStringLiteral("keys"),
+        QTextOption(Qt::AlignLeft | Qt::AlignVCenter));
+    p->setPen(m_mode == Mode::Pads ? skin.Base4.main.pen1 : skin.Gray.main.pen1);
+    p->drawText(
+        padsToggleRect(), QStringLiteral("pads"),
+        QTextOption(Qt::AlignLeft | Qt::AlignVCenter));
 
     if(m_mode == Mode::Pads)
     {
-      p->setFont(skin.Medium7Pt);
+      const bool labels = padW() >= 18.;
+      const QFontMetricsF fm{skin.Medium7Pt};
       for(std::size_t i = 0; i < m_pads.size(); i++)
       {
         const int note = m_pads[i];
         const auto r = padRect(i);
-        p->setPen(skin.Emphasis2.main.pen1);
+        p->setPen(skin.Dark.main.pen1);
         p->setBrush(
-            note == m_pressed ? skin.Base4.main.brush : skin.Emphasis2.main.brush);
+            note == m_pressed ? skin.Base4.main.brush : skin.HalfDark.main.brush);
         p->drawRoundedRect(r, 2., 2.);
-        p->setPen(
-            note == m_pressed ? skin.Background1.main.pen1
-                              : skin.Base4.lighter180.pen1);
-        p->drawText(r, noteName(note), QTextOption(Qt::AlignCenter));
+        if(!labels)
+          continue;
+        p->setFont(skin.Medium7Pt);
+        p->setPen(note == m_pressed ? skin.Dark.main.pen1 : skin.Gray.main.pen1);
+        if(const auto it = m_names.constFind(note); it != m_names.constEnd())
+        {
+          // The sound's name front and centre, the note number small in the
+          // top-left corner
+          p->drawText(
+              r.adjusted(1., 6., -1., 0.),
+              fm.elidedText(*it, Qt::ElideRight, r.width() - 2.),
+              QTextOption(Qt::AlignCenter));
+          p->setPen(skin.Gray.main.pen1);
+          p->drawText(
+              QRectF{r.x() + 2., r.y() + 1., r.width() - 3., 8.}, noteName(note),
+              QTextOption(Qt::AlignLeft));
+        }
+        else
+        {
+          p->drawText(r, noteName(note), QTextOption(Qt::AlignCenter));
+        }
       }
       return;
     }
 
-    // White keys
+    // White keys: light when mapped, sunk into the background otherwise
     for(int n = m_lo; n <= m_hi; n++)
     {
       if(isBlack(n))
         continue;
       const auto r = keyRect(n);
-      QBrush fill = m_mapped[n] ? skin.Base4.lighter180.brush : skin.Emphasis2.main.brush;
+      QBrush fill = m_mapped[n] ? skin.HalfLight.main.brush : skin.HalfDark.main.brush;
       if(n == m_pressed)
         fill = skin.Base4.main.brush;
-      p->setPen(skin.Background2.darker300.pen1);
+      p->setPen(skin.Dark.main.pen1);
       p->setBrush(fill);
       p->drawRect(r);
     }
@@ -204,23 +262,22 @@ private:
       if(!isBlack(n))
         continue;
       const auto r = keyRect(n);
-      QBrush fill = m_mapped[n] ? skin.Emphasis2.darker.brush
-                                : skin.Background2.darker300.brush;
+      QBrush fill = m_mapped[n] ? skin.Dark.main.brush : skin.HalfDark.main.brush;
       if(n == m_pressed)
         fill = skin.Base4.main.brush;
-      p->setPen(skin.Background2.darker300.pen1);
+      p->setPen(skin.Dark.main.pen1);
       p->setBrush(fill);
       p->drawRect(r);
     }
-    // Octave labels on the Cs
+    // Octave labels in their own row below the keys, aligned on the Cs
     p->setFont(skin.Medium7Pt);
-    p->setPen(skin.Base4.main.pen1);
+    p->setPen(skin.Gray.main.pen1);
     for(int n = m_lo; n <= m_hi; n += 12)
     {
       const auto r = keyRect(n);
       p->drawText(
-          QRectF{r.x(), r.bottom() - 9., key_w * 2., 9.}, noteName(n),
-          QTextOption(Qt::AlignLeft));
+          QRectF{r.x(), header_h + key_h + 1., key_w * 3., label_h - 1.},
+          noteName(n), QTextOption(Qt::AlignLeft));
     }
   }
 
@@ -287,11 +344,17 @@ private:
 
   void mousePressEvent(QGraphicsSceneMouseEvent* ev) override
   {
-    if(modeToggleRect().contains(ev->pos()))
+    if(ev->pos().y() < header_h)
     {
-      prepareGeometryChange();
-      m_mode = m_mode == Mode::Keys ? Mode::Pads : Mode::Keys;
-      update();
+      const Mode m = padsToggleRect().contains(ev->pos())   ? Mode::Pads
+                     : keysToggleRect().contains(ev->pos()) ? Mode::Keys
+                                                            : m_mode;
+      if(m != m_mode)
+      {
+        prepareGeometryChange();
+        m_mode = m;
+        update();
+      }
       ev->accept();
       return;
     }
@@ -316,7 +379,9 @@ private:
   }
 
   std::bitset<128> m_mapped;
+  QHash<int, QString> m_names;
   std::vector<int> m_pads;
+  double m_availW{480.};
   int m_lo{48}, m_hi{72};
   int m_pressed{-1};
   Mode m_mode{Mode::Keys};

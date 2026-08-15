@@ -170,6 +170,7 @@ private:
     if(!m_keyboard)
       return;
     std::bitset<128> mapped;
+    QHash<int, QString> names;
     int singleKey = 0, total = 0;
     if(auto gi = m_model.gigInfo())
     {
@@ -184,11 +185,14 @@ private:
             mapped.set(k);
           total++;
           singleKey += r.keyLow == r.keyHigh;
+          if(!r.noteLabel.empty() && r.keyLow == r.keyHigh)
+            names.insert(r.keyLow, QString::fromStdString(r.noteLabel));
         }
       }
     }
     // Kits map one note per region: default to pads there
-    m_keyboard->setMapped(mapped, total > 0 && singleKey * 2 > total);
+    m_keyboard->setMapped(
+        mapped, total > 0 && singleKey * 2 > total, std::move(names));
   }
 
   QStringList instrumentNames() const
@@ -327,6 +331,10 @@ private:
     updateKeyboard();
 
     b.finalizeLayout(this);
+    fitChildrenRect();
+
+    // Now that the layout ran, the panel width is known: let the pads fill it
+    m_keyboard->setAvailableWidth(main->boundingRect().width() - 8.);
     fitChildrenRect();
   }
 

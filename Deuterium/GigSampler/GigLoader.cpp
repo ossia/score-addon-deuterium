@@ -1466,6 +1466,7 @@ loadMetadata_hydrogen(const QString& filePath, int instrumentIndex)
     GigRegion base;
     base.keyLow = base.keyHigh = midi_note;
     base.pitchTrack = false;
+    base.noteLabel = name.toStdString();
 
     // isStopNote (a "stop note" makes note-off cut the sound) is the inverse
     // of one-shot playback
