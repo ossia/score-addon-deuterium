@@ -15,7 +15,6 @@
 #include <halp/compat/gamma.hpp>
 #include <libremidi/detail/conversion.hpp>
 
-#include <bitset>
 #include <cmath>
 
 namespace Deuterium::Gig
@@ -195,7 +194,9 @@ public:
         continue;
 
       auto& region = *voice.region;
-      auto& sampleData = region.sample.data;
+      if(!region.sample.data)
+        continue;
+      auto& sampleData = *region.sample.data;
       const int channels = sampleData.size();
       if(channels == 0)
         continue;
@@ -414,35 +415,24 @@ private:
       legatoTransfer = p.voiceMode == SamplerParams::Legato && anyHeld;
     }
 
-    // 3. zone matching with round-robin/random alternation.
-    // Alternatives share the exact same key and velocity zone.
-    std::bitset<max_regions> used;
+    // 3. zone matching with round-robin/random alternation. The loader
+    // precomputed the alternation groups (assignAlternationGroups), so the
+    // scan is linear; a small per-event cache keeps one pick per group.
+    struct GroupPick
+    {
+      int group;
+      int pick;
+    };
+    GroupPick picks[32];
+    int pickCount = 0;
+
     for(int i = 0; i < regionCount; i++)
     {
-      if(used[i])
-        continue;
       auto& region = instr.regions[i];
       if(region.muted || region.releaseTrigger)
         continue;
       if(!regionMatches(region, note, velocity))
         continue;
-
-      int group[32];
-      int groupSize = 0;
-      for(int j = i; j < regionCount && groupSize < 32; j++)
-      {
-        if(used[j])
-          continue;
-        auto& other = instr.regions[j];
-        if(other.muted || other.releaseTrigger)
-          continue;
-        if(other.keyLow == region.keyLow && other.keyHigh == region.keyHigh
-           && other.velLow == region.velLow && other.velHigh == region.velHigh)
-        {
-          used[j] = true;
-          group[groupSize++] = j;
-        }
-      }
 
       int policy = 0;
       switch(p.roundRobin)
@@ -456,24 +446,34 @@ private:
           policy = 0;
           break;
         case SamplerParams::RRCycle:
-          policy = groupSize > 1 ? SamplerParams::RRCycle : 0;
-          break;
         case SamplerParams::RRRandom:
-          policy = groupSize > 1 ? SamplerParams::RRRandom : 0;
+          policy = p.roundRobin;
           break;
       }
 
-      if(policy == 0)
+      if(policy == 0 || region.altGroup < 0 || region.altCount <= 1)
       {
-        for(int g = 0; g < groupSize; g++)
-          start_voice(instr.regions[group[g]], note, velocity, false, legatoTransfer);
+        start_voice(region, note, velocity, false, legatoTransfer);
+        continue;
       }
-      else
+
+      int pick = -1;
+      for(int k = 0; k < pickCount; k++)
+        if(picks[k].group == region.altGroup)
+        {
+          pick = picks[k].pick;
+          break;
+        }
+      if(pick < 0)
       {
-        const int pick
-            = pickAlternative(groupSize, policy, m_rrCounter[note & 127], m_rngState);
-        start_voice(instr.regions[group[pick]], note, velocity, false, legatoTransfer);
+        pick = pickAlternative(
+            region.altCount, policy, m_rrCounter[note & 127], m_rngState);
+        if(pickCount < 32)
+          picks[pickCount++] = {region.altGroup, pick};
       }
+
+      if(region.altIndex == pick)
+        start_voice(region, note, velocity, false, legatoTransfer);
     }
   }
 
@@ -539,10 +539,10 @@ private:
       const GigRegion& region, int note, int velocity, bool fromRelease,
       bool legatoTransfer = false) noexcept
   {
-    auto& sampleData = region.sample.data;
-    if(sampleData.empty() || sampleData[0].empty())
+    if(!region.sample.data || region.sample.data->empty()
+       || (*region.sample.data)[0].empty())
       return;
-    const int64_t frames = std::ssize(sampleData[0]);
+    const int64_t frames = std::ssize((*region.sample.data)[0]);
     const auto& p = m_params;
 
     auto& voice = allocate_voice();

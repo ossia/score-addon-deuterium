@@ -487,7 +487,7 @@ private Q_SLOTS:
     QCOMPARE(int(regions[0].velLow), 0);
     QCOMPARE(int(regions[0].velHigh), 127);
     QCOMPARE(regions[0].sample.midiUnityNote, uint32_t(60));
-    QVERIFY(regions[0].sample.data.empty()); // metadata only
+    QVERIFY(!regions[0].sample.data); // metadata only
   }
 
   void test_gig_samples()
@@ -501,13 +501,13 @@ private Q_SLOTS:
     auto& regions = loaded->instruments[0].regions;
     QCOMPARE(regions.size(), std::size_t(1));
     auto& sample = regions[0].sample;
-    QCOMPARE(sample.data.size(), std::size_t(1));
-    QCOMPARE(sample.data[0].size(), std::size_t(FRAMES));
+    QCOMPARE(sample.data->size(), std::size_t(1));
+    QCOMPARE((*sample.data)[0].size(), std::size_t(FRAMES));
 
     // Values must match the known ramp within 16 bit quantization
     auto ramp = rampData();
     for(int i : {0, 1, 100, FRAMES - 1})
-      QVERIFY(std::abs(sample.data[0][i] - ramp[i] / 32768.0) < 1e-9);
+      QVERIFY(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
   }
 
   void test_gig_velocity_zones_non_uniform()
@@ -536,7 +536,7 @@ private Q_SLOTS:
     QVERIFY(loaded);
 
     auto& sample = loaded->instruments[0].regions[0].sample;
-    const auto frames = sample.data[0].size();
+    const auto frames = (*sample.data)[0].size();
     if(sample.hasLoop)
     {
       QVERIFY(sample.loopEnd <= frames);
@@ -554,7 +554,7 @@ private Q_SLOTS:
 
     auto& sample = loaded->instruments[0].regions[0].sample;
     QCOMPARE(sample.sampleRate, uint32_t(96000));
-    const auto frames = sample.data[0].size();
+    const auto frames = (*sample.data)[0].size();
     QVERIFY(frames > std::size_t(FRAMES)); // upsampled
     if(sample.hasLoop)
       QVERIFY(sample.loopEnd <= frames);
@@ -586,9 +586,9 @@ private Q_SLOTS:
       {
         for(auto& r : loaded->instruments[loaded->selectedInstrument].regions)
         {
-          QVERIFY(!r.sample.data.empty());
+          QVERIFY(r.sample.data && !r.sample.data->empty());
           if(r.sample.hasLoop)
-            QVERIFY(r.sample.loopEnd <= r.sample.data[0].size());
+            QVERIFY(r.sample.loopEnd <= (*r.sample.data)[0].size());
         }
       }
     }
@@ -643,7 +643,7 @@ private Q_SLOTS:
     auto loaded = loadGigFileSamples(info, RATE, {});
     QVERIFY(loaded);
     QCOMPARE(loaded->instruments[1].regions.size(), std::size_t(1));
-    QVERIFY(!loaded->instruments[1].regions[0].sample.data.empty());
+    QVERIFY(loaded->instruments[1].regions[0].sample.data);
 
     // Out-of-range index falls back to instrument 0
     auto fallback = loadGigFileMetadata(path, 42);
@@ -676,12 +676,12 @@ private Q_SLOTS:
     auto loaded = loadGigFileSamples(info, RATE, {});
     QVERIFY(loaded);
     auto& sample = loaded->instruments[0].regions[0].sample;
-    QCOMPARE(sample.data.size(), std::size_t(1));
-    QCOMPARE(sample.data[0].size(), std::size_t(FRAMES));
+    QCOMPARE(sample.data->size(), std::size_t(1));
+    QCOMPARE((*sample.data)[0].size(), std::size_t(FRAMES));
 
     auto ramp = rampData();
     for(int i : {0, 50, FRAMES - 1})
-      QVERIFY(std::abs(sample.data[0][i] - ramp[i] / 32768.0) < 1e-9);
+      QVERIFY(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
   }
 
   // A header claiming a zero (or absurd) sample rate must neither divide by
@@ -695,9 +695,9 @@ private Q_SLOTS:
     QVERIFY(loaded);
     auto& regions = loaded->instruments[0].regions;
     QCOMPARE(regions.size(), std::size_t(1));
-    QCOMPARE(regions[0].sample.data[0].size(), std::size_t(FRAMES));
+    QCOMPARE((*regions[0].sample.data)[0].size(), std::size_t(FRAMES));
     QCOMPARE(regions[0].sample.sampleRate, uint32_t(RATE));
-    for(auto s : regions[0].sample.data[0])
+    for(auto s : (*regions[0].sample.data)[0])
       QVERIFY(std::isfinite(s));
   }
 
@@ -748,6 +748,19 @@ private Q_SLOTS:
     QCOMPARE(regions[0].keyLow, regions[1].keyLow);
     QCOMPARE(regions[0].velLow, regions[1].velLow);
     QCOMPARE(regions[0].velHigh, regions[1].velHigh);
+
+    // After phase 2: alternation groups precomputed, and both zones share
+    // one deduplicated decoded sample
+    auto loaded = loadGigFileSamples(info, RATE, {});
+    QVERIFY(loaded);
+    auto& lr = loaded->instruments[0].regions;
+    QCOMPARE(lr.size(), std::size_t(2));
+    QCOMPARE(int(lr[0].altCount), 2);
+    QCOMPARE(lr[0].altGroup, lr[1].altGroup);
+    QVERIFY(lr[0].altGroup >= 0);
+    QVERIFY(lr[0].altIndex != lr[1].altIndex);
+    QVERIFY(lr[0].sample.data);
+    QCOMPARE(lr[0].sample.data.get(), lr[1].sample.data.get());
   }
 
   // libgig LoopEnd is an inclusive last-sample index; the engine's loop.end
@@ -822,8 +835,8 @@ private Q_SLOTS:
     QCOMPARE(lregions.size(), std::size_t(3));
     for(auto& r : lregions)
     {
-      QVERIFY(!r.sample.data.empty());
-      QCOMPARE(r.sample.data[0].size(), std::size_t(FRAMES));
+      QVERIFY(r.sample.data && !r.sample.data->empty());
+      QCOMPARE((*r.sample.data)[0].size(), std::size_t(FRAMES));
     }
   }
 
@@ -893,7 +906,7 @@ private Q_SLOTS:
     auto loaded = loadGigFileSamples(info, RATE, {});
     QVERIFY(loaded);
     for(auto& lr : loaded->instruments[0].regions)
-      for(auto& ch : lr.sample.data)
+      for(auto& ch : *lr.sample.data)
         for(auto s : ch)
           QVERIFY(std::isfinite(s));
   }
@@ -921,12 +934,12 @@ private Q_SLOTS:
     QVERIFY(loaded);
     QCOMPARE(loaded->instruments[0].regions.size(), std::size_t(1));
     auto& sample = loaded->instruments[0].regions[0].sample;
-    QVERIFY(!sample.data.empty());
-    QCOMPARE(sample.data[0].size(), std::size_t(FRAMES));
+    QVERIFY(sample.data && !sample.data->empty());
+    QCOMPARE((*sample.data)[0].size(), std::size_t(FRAMES));
 
     auto ramp = rampData();
     for(int i : {0, 50, FRAMES - 1})
-      QVERIFY(std::abs(sample.data[0][i] - ramp[i] / 32768.0) < 1e-9);
+      QVERIFY(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
   }
 };
 

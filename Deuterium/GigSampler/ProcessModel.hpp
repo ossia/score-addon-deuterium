@@ -46,7 +46,7 @@ public:
   std::unique_ptr<Process::Outlet> audio_out;
 
 private:
-  void startAsyncSampleLoad();
+  void startAsyncLoad();
 
   QString m_filePath;
   int m_instrument{};

@@ -44,14 +44,7 @@ ProcessModel::ProcessModel(
   m_filePath = parsed.file;
   m_instrument = parsed.instrument;
   if(!m_filePath.isEmpty())
-  {
-    // Phase 1: fast metadata parse on the GUI thread
-    m_gigInfo = loadGigFileMetadata(m_filePath, m_instrument);
-
-    // Phase 2: async sample loading on worker thread
-    if(m_gigInfo)
-      startAsyncSampleLoad();
-  }
+    startAsyncLoad();
 }
 
 ProcessModel::~ProcessModel()
@@ -86,23 +79,16 @@ void ProcessModel::loadFile(const QString& path, int instrument)
 
   if(!path.isEmpty())
   {
-    // Phase 1: fast metadata parse
-    m_gigInfo = loadGigFileMetadata(path, instrument);
-  }
-
-  if(m_gigInfo)
-  {
-    // Phase 2: async sample loading; fileChanged() is emitted once samples land
-    startAsyncSampleLoad();
+    // Both phases run on a worker; fileChanged() fires when they finish
+    startAsyncLoad();
   }
   else
   {
-    // Loading failed: notify so any executor stops playing stale data
     fileChanged();
   }
 }
 
-void ProcessModel::startAsyncSampleLoad()
+void ProcessModel::startAsyncLoad()
 {
   auto rate = score::AppContext().settings<Audio::Settings::Model>().getRate();
 
@@ -110,16 +96,22 @@ void ProcessModel::startAsyncSampleLoad()
   auto cancelToken = std::make_shared<std::atomic<bool>>(false);
   m_cancelToken = cancelToken;
 
-  // Capture metadata snapshot for the worker thread
-  auto metadataSnapshot = m_gigInfo;
+  const QString path = m_filePath;
+  const int instrument = m_instrument;
 
   // Use a QPointer so the callback is safe if ProcessModel is deleted
   QPointer<ProcessModel> self = this;
 
   score::TaskPool::instance().post(
-      [metadataSnapshot, rate, cancelToken, self]() mutable {
+      [path, instrument, rate, cancelToken, self]() mutable {
+        // Phase 1: metadata parse - kept off the GUI thread, large banks can
+        // take a noticeable while to walk
+        auto metadata = loadGigFileMetadata(path, instrument);
+
         // Phase 2: load all sample data (slow)
-        auto loaded = loadGigFileSamples(metadataSnapshot, rate, cancelToken);
+        std::shared_ptr<GigFileInfo> loaded;
+        if(metadata && !cancelToken->load(std::memory_order_relaxed))
+          loaded = loadGigFileSamples(metadata, rate, cancelToken);
 
         if(cancelToken->load(std::memory_order_relaxed))
           return;
