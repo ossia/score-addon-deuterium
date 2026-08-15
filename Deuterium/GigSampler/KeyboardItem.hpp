@@ -89,7 +89,7 @@ public:
 
 private:
   static constexpr double header_h = 12.;
-  static constexpr double key_w = 7., key_h = 34., black_h = 20., label_h = 8.;
+  static constexpr double key_w = 8., key_h = 39., black_h = 23., label_h = 8.;
   static constexpr double pad_gap = 2.;
 
   // Pads fill the available width: rows wrap when full, and the pad width
@@ -214,14 +214,16 @@ private:
       {
         const int note = m_pads[i];
         const auto r = padRect(i);
-        p->setPen(skin.Dark.main.pen1);
+        p->setPen(skin.NoPen);
         p->setBrush(
-            note == m_pressed ? skin.Base4.main.brush : skin.HalfDark.main.brush);
+            note == m_pressed ? skin.Base4.main.brush : skin.Emphasis2.main.brush);
         p->drawRoundedRect(r, 2., 2.);
         if(!labels)
           continue;
         p->setFont(skin.Medium7Pt);
-        p->setPen(note == m_pressed ? skin.Dark.main.pen1 : skin.Gray.main.pen1);
+        p->setPen(
+            note == m_pressed ? skin.Background2.darker300.pen1
+                              : skin.Base4.lighter180.pen1);
         if(const auto it = m_names.constFind(note); it != m_names.constEnd())
         {
           // The sound's name front and centre, the note number small in the
@@ -230,7 +232,8 @@ private:
               r.adjusted(1., 6., -1., 0.),
               fm.elidedText(*it, Qt::ElideRight, r.width() - 2.),
               QTextOption(Qt::AlignCenter));
-          p->setPen(skin.Gray.main.pen1);
+          if(note != m_pressed)
+            p->setPen(skin.Gray.main.pen1);
           p->drawText(
               QRectF{r.x() + 2., r.y() + 1., r.width() - 3., 8.}, noteName(note),
               QTextOption(Qt::AlignLeft));
@@ -243,16 +246,18 @@ private:
       return;
     }
 
-    // White keys: light when mapped, sunk into the background otherwise
+    // White keys: warm ivory when mapped (same family as the knob readouts),
+    // knob-body gray when unmapped, accent orange when pressed
     for(int n = m_lo; n <= m_hi; n++)
     {
       if(isBlack(n))
         continue;
       const auto r = keyRect(n);
-      QBrush fill = m_mapped[n] ? skin.HalfLight.main.brush : skin.HalfDark.main.brush;
+      QBrush fill
+          = m_mapped[n] ? skin.Base4.lighter180.brush : skin.Emphasis2.main.brush;
       if(n == m_pressed)
         fill = skin.Base4.main.brush;
-      p->setPen(skin.Dark.main.pen1);
+      p->setPen(skin.Background2.darker300.pen1);
       p->setBrush(fill);
       p->drawRect(r);
     }
@@ -262,16 +267,19 @@ private:
       if(!isBlack(n))
         continue;
       const auto r = keyRect(n);
-      QBrush fill = m_mapped[n] ? skin.Dark.main.brush : skin.HalfDark.main.brush;
+      QBrush fill = m_mapped[n] ? skin.Background2.darker300.brush
+                                : skin.Emphasis2.darker.brush;
       if(n == m_pressed)
         fill = skin.Base4.main.brush;
-      p->setPen(skin.Dark.main.pen1);
+      p->setPen(skin.Background2.darker300.pen1);
       p->setBrush(fill);
       p->drawRect(r);
     }
     // Octave labels in their own row below the keys, aligned on the Cs
-    p->setFont(skin.Medium7Pt);
-    p->setPen(skin.Gray.main.pen1);
+    QFont tiny = skin.Medium7Pt;
+    tiny.setPointSizeF(std::max(4., tiny.pointSizeF() - 2.));
+    p->setFont(tiny);
+    p->setPen(skin.Base4.lighter180.pen1);
     for(int n = m_lo; n <= m_hi; n += 12)
     {
       const auto r = keyRect(n);
