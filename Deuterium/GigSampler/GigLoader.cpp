@@ -4,7 +4,7 @@
 
 #include <QDir>
 #include <QDirIterator>
-#include <QDomDocument>
+#include <QXmlStreamReader>
 #include <QHash>
 #include <QFile>
 #include <QFileInfo>
@@ -341,8 +341,8 @@ void convertAndPrune(
           smp.loopEnd = (uint32_t)(smp.loopEnd * conv.ratio);
         }
         if(region.sampleStartOffset > 0)
-          region.sampleStartOffset = (uint16_t)std::clamp<int64_t>(
-              std::llround(region.sampleStartOffset * conv.ratio), 0, 65535);
+          region.sampleStartOffset = (uint32_t)std::clamp<int64_t>(
+              std::llround(region.sampleStartOffset * conv.ratio), 0, INT32_MAX);
       }
 
       // Clamp loop points to the decoded frame count: files can declare
@@ -629,11 +629,15 @@ double dlsTimeCentsToSeconds(int32_t tc)
   return std::pow(2.0, tc / (1200.0 * 65536.0));
 }
 
-// Gain is stored as 32 bit fixed point relative gain in dB;
-// same conversion libgig applies for gig::DimensionRegion::SampleAttenuation.
+uint8_t frequencyToVcfCutoff(double freq);
+
+// Gain is stored as 32 bit fixed point relative gain in dB (1/655360 dB
+// units). Per the DLS spec the value is <= 0 and negative attenuates; some
+// gig-style writers store a positive attenuation instead, so never boost:
+// treat any sign as attenuation.
 double dlsGainToLinear(int32_t gain)
 {
-  return std::pow(10.0, -gain / (20.0 * 655360.0));
+  return std::pow(10.0, -std::abs((double)gain) / (20.0 * 655360.0));
 }
 
 void applyDlsArticulations(DLS::Articulator& art, GigRegion& region)
@@ -660,13 +664,40 @@ void applyDlsArticulations(DLS::Articulator& art, GigRegion& region)
           region.eg1Release = dlsTimeCentsToSeconds(scale);
           break;
         case DLS::conn_dst_eg1_sustainlevel:
-          // 16.16 fixed point percentage
-          region.eg1Sustain = std::clamp(scale / 65536.0 / 100.0, 0.0, 1.0);
+          // 0.1% units in 16.16 fixed point: 0 .. 1000 = 0 .. 100%
+          region.eg1Sustain = std::clamp(scale / 65536.0 / 1000.0, 0.0, 1.0);
           break;
         case DLS::conn_dst_pan:
-          // 16.16 fixed point percentage, -50% .. +50%
+          // 0.1% units in 16.16 fixed point: -500 .. +500 = hard left..right
           region.pan = (int8_t)std::clamp<int>(
-              (int)std::lround(scale / 65536.0 / 100.0 * 127.0), -64, 63);
+              (int)std::lround(scale / 655360.0 / 50.0 * 64.0), -64, 63);
+          break;
+        case DLS::conn_dst_gain:
+          // Static per-region level (0.1 dB units in 16.16), multiplicative
+          // with the wsmp gain; SF2->DLS converters put layer balance here
+          region.sampleAttenuation
+              *= std::pow(10.0, -std::abs(scale / 655360.0) / 20.0);
+          break;
+        case DLS::conn_dst_pitch:
+          // Static tuning offset, pitch cents in 16.16
+          region.pitchOffset += scale / 65536.0 / 100.0;
+          break;
+        case DLS::conn_dst_filter_cutoff:
+          // Absolute pitch cents (16.16) relative to 8.176 Hz
+          if(const double cents = scale / 65536.0; cents > 0 && cents < 13500)
+          {
+            region.vcfEnabled = true;
+            region.vcfCutoff
+                = frequencyToVcfCutoff(8.176 * std::pow(2.0, cents / 1200.0));
+          }
+          break;
+        case DLS::conn_dst_filter_q:
+          // 0.1 dB units in 16.16 -> centibels
+          if(const double qCb = scale / 65536.0; qCb > 0)
+          {
+            region.vcfEnabled = true;
+            region.vcfQCb = (float)std::clamp(qCb, 0.0, 960.0);
+          }
           break;
         default:
           break;
@@ -729,22 +760,37 @@ loadMetadata_dls(const QString& filePath, int instrumentIndex)
       region.velHigh = (uint8_t)std::min<uint16_t>(rgn->VelocityRange.high, 127);
     }
 
-    region.sampleAttenuation = dlsGainToLinear(rgn->Gain);
+    // wsmp override rule: the region's wsmp chunk overrides the wave's as a
+    // whole; when the region has none, the wave's unity note / fine tune /
+    // gain / loop table apply (many DLS files only carry wave-level wsmp)
+    const bool rgnWsmp = rgn->WavesampleChunkPresent;
+    region.sampleAttenuation = dlsGainToLinear(
+        rgnWsmp ? rgn->Gain : (smp->WsmpPresent ? smp->WsmpGain : 0));
     region.sample.sampleRate = smp->SamplesPerSecond;
-    region.sample.midiUnityNote = std::min<uint32_t>(rgn->UnityNote, 127);
-    region.sample.fineTune = rgn->FineTune;
-    if(rgn->KeyGroup > 0)
+    region.sample.midiUnityNote = std::min<uint32_t>(
+        rgnWsmp ? rgn->UnityNote : (smp->WsmpPresent ? smp->WsmpUnityNote : 60), 127);
+    region.sample.fineTune
+        = rgnWsmp ? rgn->FineTune : (smp->WsmpPresent ? smp->WsmpFineTune : 0);
+    // Key groups are defined for drum instruments, valid range 1-15, and a
+    // self-non-exclusive region must not choke its own retriggers
+    if(dlsInstr->IsDrum && rgn->KeyGroup >= 1 && rgn->KeyGroup <= 15
+       && !rgn->SelfNonExclusive)
       region.chokeGroup = rgn->KeyGroup;
 
-    if(rgn->SampleLoops > 0 && rgn->pSampleLoops)
+    const uint32_t nLoops = rgnWsmp ? rgn->SampleLoops : smp->WsmpSampleLoops;
+    const auto* loops = rgnWsmp ? rgn->pSampleLoops : smp->pWsmpSampleLoops;
+    if(nLoops > 0 && loops)
     {
-      const auto& loop = rgn->pSampleLoops[0];
+      const auto& loop = loops[0];
       if(loop.LoopLength > 0)
       {
         region.sample.hasLoop = true;
         region.sample.loopStart = loop.LoopStart;
         region.sample.loopEnd = loop.LoopStart + loop.LoopLength;
-        region.sample.loopType = (int)loop.LoopType;
+        // DLS loop type 1 is a release loop: loop while the note is held,
+        // then play through the tail of the wave
+        region.sample.loopType = 0;
+        region.sample.loopUntilRelease = loop.LoopType == 1;
       }
     }
 
@@ -911,38 +957,58 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
       region.velHigh = velHigh;
 
       region.pitchTrack = !smp->IsUnpitched();
-      // initialAttenuation is in centibels of attenuation (0..1440)
+      // initialAttenuation is in centibels of attenuation (0..1440), scaled
+      // by the 0.4 factor of the EMU8k/10k hardware: FluidSynth applies it
+      // unconditionally and real-world banks are balanced against it
       region.sampleAttenuation = std::pow(
-          10.0, -std::clamp(iz->GetInitialAttenuation(pz), 0, 1440) / 200.0);
-      region.sample.midiUnityNote = (uint32_t)std::clamp(
-          iz->GetUnityNote() - iz->GetCoarseTune(pz), 0, 127);
+          10.0, -0.4 * std::clamp(iz->GetInitialAttenuation(pz), 0, 1440) / 200.0);
+      // Coarse tune is a separate pitch offset, not a root key change:
+      // folding it into the root both clamps wrongly at the MIDI range edges
+      // and loses it entirely for unpitched (fixed-pitch) samples
+      region.sample.midiUnityNote = (uint32_t)std::clamp(iz->GetUnityNote(), 0, 127);
+      region.pitchOffset += iz->GetCoarseTune(pz);
+      // scaleTuning: cents of pitch per key step; 0 = fixed pitch
+      region.keyScale = iz->GetScaleTuning(pz) / 100.0;
       // The sample header's pitch correction (signed cents) applies on top
       // of the fine tune generators; banks sampled from hardware rely on it
       // heavily and skipping it leaves regions audibly out of tune.
       region.sample.fineTune = iz->GetFineTune(pz) + smp->PitchCorrection;
       region.pan = (int8_t)std::clamp(iz->GetPan(pz), -64, 63);
-      region.sampleStartOffset = (uint16_t)std::clamp<int64_t>(
+      region.sampleStartOffset = (uint32_t)std::clamp<int64_t>(
           (int64_t)iz->startAddrsOffset + 32768ll * iz->startAddrsCoarseOffset, 0,
-          65535);
+          INT32_MAX);
 
-      // EG1: hold folded into the decay stage (our envelope has no hold)
-      region.eg1Attack = iz->GetEG1Attack(pz);
-      region.eg1Decay = iz->GetEG1Hold(pz) + iz->GetEG1Decay(pz);
-      // Sustain is an attenuation in centibels
+      // EG1: hold folded into the decay stage (our envelope has no hold).
+      // Per the spec the decay generator is the time for a full 100 dB fall;
+      // the phase ends when the sustain level is reached, so the audible
+      // decay is that time scaled by the sustain depth (FluidSynth model).
       const double sustainCb = std::clamp(iz->GetEG1Sustain(pz), 0, 1440);
+      region.eg1Attack = iz->GetEG1Attack(pz);
+      region.eg1Decay = iz->GetEG1Hold(pz)
+                        + iz->GetEG1Decay(pz) * std::min(sustainCb, 1000.0) / 1000.0;
       region.eg1Sustain = std::pow(10.0, -sustainCb / 200.0);
       region.eg1Release = iz->GetEG1Release(pz);
+      // High notes decay faster (timecents per key relative to key 60)
+      region.keynumToDecay = iz->GetKeynumToVolEnvDecay(pz);
 
-      // Filter: 13500 absolute cents is the "fully open" default
+      // Filter: 13500 absolute cents is the "fully open" default, but a
+      // non-zero Q still applies its gain change there (FluidSynth never
+      // bypasses the filter)
       const int fc = iz->GetInitialFilterFc(pz);
-      if(fc > 0 && fc < 13500)
+      const int qCb = std::clamp(iz->GetInitialFilterQ(pz), 0, 960);
+      if(fc < 13500 || qCb > 0)
       {
         region.vcfEnabled = true;
         region.vcfCutoff = frequencyToVcfCutoff(8.176 * std::pow(2.0, fc / 1200.0));
-        // Q in centibels -> the executor maps resonance 0-127 to Q 1-10
-        const double q = std::pow(10.0, std::clamp(iz->GetInitialFilterQ(pz), 0, 960) / 200.0);
-        region.vcfResonance
-            = (uint8_t)std::clamp((int)std::lround((q - 1.0) * 127.0 / 9.0), 0, 127);
+        region.vcfQCb = qCb;
+      }
+
+      // File-specified vibrato
+      if(const int vibCents = iz->GetVibLfoToPitch(pz))
+      {
+        region.vibLfoToPitch = vibCents;
+        region.vibLfoFreq = (float)iz->GetFreqVibLfo(pz);
+        region.vibLfoDelay = (float)iz->GetDelayVibLfo(pz);
       }
 
       region.sample.sampleRate = smp->SampleRate;
@@ -951,6 +1017,7 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
         region.sample.hasLoop = true;
         region.sample.loopStart = iz->LoopStart;
         region.sample.loopEnd = iz->LoopEnd;
+        region.sample.loopUntilRelease = iz->LoopUntilRelease;
       }
       if(iz->exclusiveClass > 0)
         region.chokeGroup = (int)iz->exclusiveClass;
@@ -1056,11 +1123,80 @@ uint8_t hydrogenCutoffToVcf(double cutoff01)
   return frequencyToVcfCutoff(std::clamp(cutoff01 * 20000., 20., 20000.));
 }
 
+// Minimal DOM built with QXmlStreamReader so the loader does not depend on
+// the QtXml module (absent from some Qt deployments); mirrors the small
+// QDomElement surface the drumkit parser needs.
+struct XmlElement
+{
+  QString tag;
+  QString textContent;
+  std::vector<XmlElement> children;
+
+  bool isNull() const noexcept { return tag.isEmpty(); }
+  const QString& text() const noexcept { return textContent; }
+
+  const XmlElement& firstChildElement(const char* name) const noexcept
+  {
+    static const XmlElement null_element;
+    for(const auto& c : children)
+      if(c.tag == QLatin1StringView(name))
+        return c;
+    return null_element;
+  }
+
+  // All direct children with the given tag, in document order
+  std::vector<const XmlElement*> childrenNamed(const char* name) const
+  {
+    std::vector<const XmlElement*> out;
+    for(const auto& c : children)
+      if(c.tag == QLatin1StringView(name))
+        out.push_back(&c);
+    return out;
+  }
+};
+
+bool parseXml(QIODevice& dev, XmlElement& root)
+{
+  QXmlStreamReader xr(&dev);
+  // Ancestors' child vectors only grow while they are top-of-stack, so the
+  // raw pointers stay valid for as long as they are on the stack
+  std::vector<XmlElement*> stack;
+  while(!xr.atEnd())
+  {
+    switch(xr.readNext())
+    {
+      case QXmlStreamReader::StartElement:
+        if(stack.empty())
+        {
+          root.tag = xr.name().toString();
+          stack.push_back(&root);
+        }
+        else
+        {
+          stack.back()->children.push_back(XmlElement{xr.name().toString(), {}, {}});
+          stack.push_back(&stack.back()->children.back());
+        }
+        break;
+      case QXmlStreamReader::Characters:
+        if(!stack.empty() && !xr.isWhitespace())
+          stack.back()->textContent += xr.text();
+        break;
+      case QXmlStreamReader::EndElement:
+        if(!stack.empty())
+          stack.pop_back();
+        break;
+      default:
+        break;
+    }
+  }
+  return !xr.hasError() && !root.isNull();
+}
+
 // Numeric XML element with a default: missing elements and non-finite or
 // unparseable values (hand-edited kits do contain "nan"s) yield the default.
-double xmlNumber(const QDomElement& parent, const char* name, double def)
+double xmlNumber(const XmlElement& parent, const char* name, double def)
 {
-  const auto e = parent.firstChildElement(name);
+  const auto& e = parent.firstChildElement(name);
   if(e.isNull())
     return def;
   bool ok{};
@@ -1077,13 +1213,12 @@ loadMetadata_hydrogen(const QString& filePath, int instrumentIndex)
   if(!file.open(QIODevice::ReadOnly))
     return {};
 
-  QDomDocument doc;
-  if(!doc.setContent(&file))
+  XmlElement root;
+  if(!parseXml(file, root))
     return {};
   file.close();
 
-  QDomElement root = doc.documentElement();
-  if(root.tagName() != "drumkit_info")
+  if(root.tag != "drumkit_info")
     return {};
 
   const auto dir = QFileInfo{filePath}.dir();
@@ -1102,14 +1237,14 @@ loadMetadata_hydrogen(const QString& filePath, int instrumentIndex)
   constexpr double hydrogenFramesToSeconds = 1.0 / 44100.0;
 
   int base_midi_note = 36; // for instruments that do not specify a note
-  for(QDomElement inst
-      = root.firstChildElement("instrumentList").firstChildElement("instrument");
-      !inst.isNull(); inst = inst.nextSiblingElement("instrument"))
+  for(const XmlElement* instp :
+      root.firstChildElement("instrumentList").childrenNamed("instrument"))
   {
+    const XmlElement& inst = *instp;
     const auto name = inst.firstChildElement("name").text();
 
     int midi_note = base_midi_note;
-    if(const auto midiOutNote = inst.firstChildElement("midiOutNote");
+    if(const auto& midiOutNote = inst.firstChildElement("midiOutNote");
        !midiOutNote.isNull())
     {
       midi_note = midiOutNote.text().toInt();
@@ -1141,22 +1276,24 @@ loadMetadata_hydrogen(const QString& filePath, int instrumentIndex)
     // of one-shot playback
     base.oneShot = inst.firstChildElement("isStopNote").text() != "true";
     base.muted = inst.firstChildElement("isMuted").text() == "true";
-    if(const auto applyVel = inst.firstChildElement("applyVelocity");
+    if(const auto& applyVel = inst.firstChildElement("applyVelocity");
        !applyVel.isNull())
       base.applyVelocity = applyVel.text() == "true";
 
     // Hydrogen >= 1.1: how the layer within a velocity range is picked.
     // In format v2 the element moved inside <instrumentComponent>.
-    const auto algoOf = [](const QDomElement& e) {
-      const auto t = e.text();
+    const auto algoOf = [](const XmlElement& e) {
+      const auto& t = e.text();
       return t == QStringLiteral("ROUND_ROBIN") ? 1
              : t == QStringLiteral("RANDOM")    ? 2
                                                 : 0;
     };
-    if(const auto algo = inst.firstChildElement("sampleSelectionAlgo"); !algo.isNull())
+    if(const auto& algo = inst.firstChildElement("sampleSelectionAlgo");
+       !algo.isNull())
       base.selectionAlgo = algoOf(algo);
-    else if(const auto c = inst.firstChildElement("instrumentComponent"); !c.isNull())
-      if(const auto algo2 = c.firstChildElement("sampleSelectionAlgo"); !algo2.isNull())
+    else if(const auto& c = inst.firstChildElement("instrumentComponent"); !c.isNull())
+      if(const auto& algo2 = c.firstChildElement("sampleSelectionAlgo");
+         !algo2.isNull())
         base.selectionAlgo = algoOf(algo2);
 
     const double volume = xmlNumber(inst, "volume", 1.0);
@@ -1202,7 +1339,7 @@ loadMetadata_hydrogen(const QString& filePath, int instrumentIndex)
 
     // Layers appear in three generations of the schema: bare <filename>,
     // <layer> children, or <instrumentComponent><layer>.
-    auto addLayer = [&](const QDomElement& layerElem) {
+    auto addLayer = [&](const XmlElement& layerElem) {
       const auto filename = layerElem.firstChildElement("filename").text();
       if(filename.isEmpty() || !dir.exists(filename))
         return;
@@ -1235,23 +1372,22 @@ loadMetadata_hydrogen(const QString& filePath, int instrumentIndex)
       kit.regions.push_back(std::move(region));
     };
 
-    const auto layers = inst.firstChildElement("layer");
-    const auto component = inst.firstChildElement("instrumentComponent");
-    if(layers.isNull() && component.isNull())
+    const auto layers = inst.childrenNamed("layer");
+    const auto& component = inst.firstChildElement("instrumentComponent");
+    if(layers.empty() && component.isNull())
     {
       // Oldest schema: a single <filename> directly on the instrument
       addLayer(inst);
     }
-    else if(!layers.isNull())
+    else if(!layers.empty())
     {
-      for(QDomElement l = layers; !l.isNull(); l = l.nextSiblingElement("layer"))
-        addLayer(l);
+      for(const XmlElement* l : layers)
+        addLayer(*l);
     }
     else
     {
-      for(QDomElement l = component.firstChildElement("layer"); !l.isNull();
-          l = l.nextSiblingElement("layer"))
-        addLayer(l);
+      for(const XmlElement* l : component.childrenNamed("layer"))
+        addLayer(*l);
     }
   }
 

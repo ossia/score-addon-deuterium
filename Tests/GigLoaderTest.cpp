@@ -321,7 +321,9 @@ QString makeHydrogenKit(const QString& dirPath)
   return dirPath + "/drumkit.xml";
 }
 
-QString makeSf2File(const QString& path, int8_t pitchCorrection = 0)
+QString makeSf2File(
+    const QString& path, int8_t pitchCorrection = 0,
+    std::vector<std::pair<uint16_t, uint16_t>> extraIGens = {})
 {
   using namespace sf2writer;
   auto data = rampData();
@@ -380,7 +382,7 @@ QString makeSf2File(const QString& path, int8_t pitchCorrection = 0)
   QByteArray ibag;
   u16(ibag, 0);
   u16(ibag, 0);
-  u16(ibag, 4);
+  u16(ibag, uint16_t(4 + extraIGens.size())); // one past the last igen
   u16(ibag, 0); // terminal
 
   QByteArray imod(10, '\0');
@@ -389,6 +391,10 @@ QString makeSf2File(const QString& path, int8_t pitchCorrection = 0)
   genRange(igen, gen_keyRange, 30, 90);
   genRange(igen, gen_velRange, 10, 100);
   gen(igen, gen_sampleModes, 1); // looping enabled
+  // Extra instrument-zone generators; a later gen with the same opcode
+  // overrides an earlier one, so these can also replace sampleModes
+  for(const auto& [op, amount] : extraIGens)
+    gen(igen, op, amount);
   gen(igen, gen_sampleID, 0);
   gen(igen, 0, 0); // terminal
 
@@ -921,6 +927,61 @@ TEST_CASE("loader: sf2_pitch_correction_applied", "[deuterium]")
   auto& regions = info->instruments[0].regions;
   REQUIRE(approxEq(regions.size(), std::size_t(1)));
   REQUIRE(approxEq(regions[0].sample.fineTune, -32.f));
+}
+
+// scaleTuning = 0 means fixed pitch across the zone (drum/SFX samples)
+TEST_CASE("loader: sf2_scale_tuning", "[deuterium]")
+{
+  const auto path = makeSf2File(tmp("scaletune.sf2"), 0, {{56, 0}});
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  REQUIRE(std::abs(info->instruments[0].regions[0].keyScale - 0.0) < 1e-9);
+
+  const auto path2 = makeSf2File(tmp("scaletune-default.sf2"));
+  auto info2 = loadGigFileMetadata(path2);
+  REQUIRE(info2);
+  REQUIRE(std::abs(info2->instruments[0].regions[0].keyScale - 1.0) < 1e-9);
+}
+
+// initialAttenuation is scaled by the 0.4 EMU factor like in FluidSynth:
+// 200 cB in the file is an effective -8 dB, not -20 dB
+TEST_CASE("loader: sf2_attenuation_emu_factor", "[deuterium]")
+{
+  const auto path = makeSf2File(tmp("atten.sf2"), 0, {{48, 200}});
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  const double expected = std::pow(10.0, -0.4 * 200.0 / 200.0);
+  REQUIRE(std::abs(info->instruments[0].regions[0].sampleAttenuation - expected) < 1e-6);
+}
+
+// The decay generator is the time for a full-scale fall; the audible
+// peak-to-sustain time is scaled by the sustain depth
+TEST_CASE("loader: sf2_decay_scaled_by_sustain", "[deuterium]")
+{
+  // decay = 0 tc = 1 s, sustain = 100 cB -> audible decay ~ 0.1 s
+  const auto path = makeSf2File(tmp("decay.sf2"), 0, {{36, 0}, {37, 100}});
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto& r = info->instruments[0].regions[0];
+  REQUIRE((r.eg1Decay > 0.09 && r.eg1Decay < 0.11));
+  REQUIRE(std::abs(r.eg1Sustain - std::pow(10.0, -100.0 / 200.0)) < 1e-6);
+}
+
+// sampleModes 3 loops while the key is held, then plays the tail
+TEST_CASE("loader: sf2_loop_until_release", "[deuterium]")
+{
+  const auto path = makeSf2File(tmp("loopmode3.sf2"), 0, {{54, 3}});
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto& s = info->instruments[0].regions[0].sample;
+  REQUIRE(s.hasLoop);
+  REQUIRE(s.loopUntilRelease);
+
+  const auto path2 = makeSf2File(tmp("loopmode1.sf2"));
+  auto info2 = loadGigFileMetadata(path2);
+  REQUIRE(info2);
+  REQUIRE(info2->instruments[0].regions[0].sample.hasLoop);
+  REQUIRE(!info2->instruments[0].regions[0].sample.loopUntilRelease);
 }
 
 TEST_CASE("loader: sf2", "[deuterium]")

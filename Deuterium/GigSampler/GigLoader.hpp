@@ -24,6 +24,9 @@ struct GigSample
   uint32_t loopStart{0};
   uint32_t loopEnd{0};
   int loopType{0}; // 0=forward, 1=bidirectional, 2=backward
+  // SF2 sampleModes 3 / DLS release loops: loop while the note is held,
+  // then play through the rest of the sample
+  bool loopUntilRelease{false};
 };
 
 struct GigRegion
@@ -43,12 +46,26 @@ struct GigRegion
   bool vcfEnabled{false};
   uint8_t vcfCutoff{127};
   uint8_t vcfResonance{0};
+  // File-specified resonance in centibels (SF2 initialFilterQ / DLS filter Q);
+  // < 0 = not set, use the vcfResonance byte. The engine applies the SF2
+  // -3.01 dB convention and passband gain compensation for this path.
+  float vcfQCb{-1.f};
 
   // Playback
   bool pitchTrack{true};
-  int8_t pan{0}; // -64..63
+  double keyScale{1.0}; // semitones of pitch per key step (SF2 scaleTuning/100)
+  int8_t pan{0};        // -64..63
   double sampleAttenuation{1.0};
-  uint16_t sampleStartOffset{0};
+  uint32_t sampleStartOffset{0};
+
+  // Vol env decay scaling per key (SF2 keynumToVolEnvDecay, timecents/key
+  // relative to key 60); 0 = none
+  float keynumToDecay{0.f};
+
+  // File-specified vibrato (SF2 vibLfo); toPitch in cents, 0 = none
+  float vibLfoToPitch{0.f};
+  float vibLfoFreq{4.f};   // Hz
+  float vibLfoDelay{0.f};  // seconds
 
   // Drum-style behavior (Hydrogen kits; also expressible by other formats)
   bool oneShot{false};       // ignore note-off, play until the sample ends
