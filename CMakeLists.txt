@@ -26,6 +26,7 @@ set(LIBGIG_SRCS
   "${LIBGIG_DIR}/src/DLS.cpp"
   "${LIBGIG_DIR}/src/gig.cpp"
   "${LIBGIG_DIR}/src/helper.cpp"
+  "${LIBGIG_DIR}/src/Korg.cpp"
   "${LIBGIG_DIR}/src/RIFF.cpp"
   "${LIBGIG_DIR}/src/Serialization.cpp"
   "${LIBGIG_DIR}/src/SF.cpp"

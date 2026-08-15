@@ -59,6 +59,9 @@ enum SamplerControl : int
 
   RoundRobin,
 
+  Chromatic,
+  ChromaticRoot,
+
   ControlCount
 };
 
@@ -162,6 +165,11 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
        {QStringLiteral("Cycle"), 2},
        {QStringLiteral("Random"), 3}},
       0, QStringLiteral("Alternate"));
+
+  v[Chromatic] = new Process::Toggle{
+      false, QStringLiteral("Chromatic"), id(Chromatic), parent};
+  v[ChromaticRoot] = new Process::IntSlider{
+      0, 127, 60, QStringLiteral("Chromatic root"), id(ChromaticRoot), parent};
 
   return v;
 }
