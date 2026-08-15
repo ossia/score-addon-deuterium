@@ -15,6 +15,7 @@
 
 #include <Process/Commands/SetControlValue.hpp>
 
+#include <score/application/GUIApplicationContext.hpp>
 #include <score/command/Dispatchers/CommandDispatcher.hpp>
 #include <score/graphics/TextItem.hpp>
 #include <score/graphics/layouts/GraphicsBoxLayout.hpp>
