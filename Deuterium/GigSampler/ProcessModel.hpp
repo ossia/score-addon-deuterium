@@ -29,6 +29,7 @@ public:
       : Process::ProcessModel{vis, parent}
   {
     vis.writeTo(*this);
+    wireInstrumentControl();
   }
 
   ~ProcessModel() override;
@@ -46,6 +47,7 @@ public:
   std::unique_ptr<Process::Outlet> audio_out;
 
 private:
+  void wireInstrumentControl();
   void startAsyncLoad();
 
   QString m_filePath;

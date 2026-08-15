@@ -62,6 +62,11 @@ enum SamplerControl : int
   Chromatic,
   ChromaticRoot,
 
+  // Appended late (order is the serialization contract; ensureControls
+  // appends missing trailing controls when loading older documents)
+  EnvFromFile,
+  Instrument,
+
   ControlCount
 };
 
@@ -74,6 +79,9 @@ inline constexpr bool isTimeControl(int c) noexcept
 {
   switch(c)
   {
+    case Attack:
+    case Decay:
+    case Release:
     case FilterEnvAttack:
     case FilterEnvDecay:
     case FilterEnvRelease:
@@ -122,11 +130,12 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
   flt(FineTune, -100.f, 100.f, 0.f, QStringLiteral("Fine tune"));
   flt(BendRange, 0.f, 24.f, 2.f, QStringLiteral("Bend range"));
 
-  // < 0 means "use the value from the file"
-  flt(Attack, -0.001f, 5.f, -0.001f, QStringLiteral("Attack"));
-  flt(Decay, -0.001f, 5.f, -0.001f, QStringLiteral("Decay"));
-  flt(Sustain, -0.01f, 1.f, -0.01f, QStringLiteral("Sustain"));
-  flt(Release, -0.001f, 8.f, -0.001f, QStringLiteral("Release"));
+  // Only in effect when EnvFromFile is off; historical documents instead
+  // carry sliders whose negative values mean "use the file's envelope".
+  time(Attack, 0.001f, 5.f, 0.001f, QStringLiteral("Attack"));
+  time(Decay, 0.001f, 5.f, 0.15f, QStringLiteral("Decay"));
+  flt(Sustain, 0.f, 1.f, 1.f, QStringLiteral("Sustain"));
+  time(Release, 0.001f, 8.f, 0.05f, QStringLiteral("Release"));
 
   combo(
       FilterType,
@@ -211,6 +220,14 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
       false, QStringLiteral("Chromatic"), id(Chromatic), parent};
   v[ChromaticRoot] = new Process::IntSlider{
       0, 127, 60, QStringLiteral("Chromatic root"), id(ChromaticRoot), parent};
+
+  v[EnvFromFile] = new Process::Toggle{
+      true, QStringLiteral("Env from file"), id(EnvFromFile), parent};
+
+  // Which instrument of the loaded file plays; switching reloads only the
+  // sample data, every other control keeps its value.
+  v[Instrument] = new Process::IntSlider{
+      0, 127, 0, QStringLiteral("Instrument"), id(Instrument), parent};
 
   return v;
 }

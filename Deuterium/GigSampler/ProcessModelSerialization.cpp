@@ -34,9 +34,18 @@ void ensureControls(Deuterium::Gig::ProcessModel& proc, Process::Inlets& inlets)
   for(std::size_t c = 0; c < all.size(); c++)
   {
     if(1 + c < have)
+    {
       delete all[c]; // this position was restored from the document
+    }
     else
+    {
+      // Documents predating EnvFromFile carry the envelope override in the
+      // ADSR sliders themselves (negative = use the file's envelope): keep
+      // those sliders authoritative instead of the new toggle's default.
+      if(int(c) == Deuterium::Gig::EnvFromFile)
+        all[c]->setValue(false);
       inlets.push_back(all[c]);
+    }
   }
 }
 }

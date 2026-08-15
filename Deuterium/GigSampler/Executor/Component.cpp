@@ -98,6 +98,28 @@ public:
 
   void set_control(int control, const ossia::value& v)
   {
+    if(control == EnvFromFile)
+    {
+      m_envFromFile = ossia::convert<bool>(v);
+      resolve_time(Attack);
+      resolve_time(Decay);
+      resolve_time(Release);
+      resolve_sustain();
+      m_feedback[control][0] = m_envFromFile ? 1.f : 0.f;
+      m_feedback[control][1] = 0.f;
+      return;
+    }
+    if(control == Sustain)
+    {
+      // Negative values are the historical "use the file's envelope" sentinel
+      const float f = ossia::convert<float>(v);
+      m_sustainRaw = f;
+      m_sustainIsSentinel = f < 0.f;
+      resolve_sustain();
+      m_feedback[control][0] = f;
+      m_feedback[control][1] = 0.f;
+      return;
+    }
     if(isTimeControl(control))
     {
       if(auto vec = v.target<ossia::vec2f>())
@@ -130,6 +152,15 @@ public:
     const float secs = raw.sync ? syncTimeToSeconds(raw.x, m_tempo) : raw.x;
     switch(control)
     {
+      case Attack:
+        m_params.attack = m_envFromFile ? -1.f : secs;
+        break;
+      case Decay:
+        m_params.decay = m_envFromFile ? -1.f : secs;
+        break;
+      case Release:
+        m_params.release = m_envFromFile ? -1.f : secs;
+        break;
       case FilterEnvAttack:
         m_params.filterEnvAttack = secs;
         break;
@@ -750,6 +781,15 @@ public:
     bool is_vec{};
   };
   TimeRaw m_timeRaw[ControlCount]{};
+  bool m_envFromFile{true};
+  float m_sustainRaw{1.f};
+  bool m_sustainIsSentinel{};
+
+  void resolve_sustain() noexcept
+  {
+    m_params.sustain
+        = (m_envFromFile || m_sustainIsSentinel) ? -1.f : m_sustainRaw;
+  }
   double m_tempo{ossia::root_tempo};
 
   // Effective control values, read from the UI thread by the feedback timer.

@@ -244,3 +244,31 @@ TEST_CASE("model: control_widget_types", "[deuterium]")
   REQUIRE(approxEq(v[0], 0.2f));
   REQUIRE(approxEq(v[1], 0.f)); // widget convention: y == 0 is free-running
 }
+
+// The Instrument inlet and the serialized instrument index stay in sync:
+// the port drives which instrument plays without touching other controls.
+TEST_CASE("model: instrument_port_sync", "[deuterium]")
+{
+  bootApp();
+  Deuterium::Gig::ProcessModel p{
+      TimeVal::fromMsecs(1000), "/nonexistent/dir/bank.sf2|3",
+      Id<Process::ProcessModel>{30}, nullptr};
+
+  auto* ctl = qobject_cast<Process::ControlInlet*>(
+      p.inlets()[1 + Deuterium::Gig::Instrument]);
+  REQUIRE(ctl);
+  REQUIRE(ossia::convert<int>(ctl->value()) == 3);
+
+  // Changing the port changes the instrument, keeps the file path
+  ctl->setValue(5);
+  REQUIRE(p.instrument() == 5);
+  REQUIRE(p.effect() == QStringLiteral("/nonexistent/dir/bank.sf2"));
+
+  // loadFile keeps the port in sync
+  p.loadFile("/nonexistent/dir/other.gig", 1);
+  REQUIRE(ossia::convert<int>(ctl->value()) == 1);
+  REQUIRE(p.instrument() == 1);
+
+  // And the legacy-document append path gives the toggle+port sensible
+  // defaults (checked in released_deuterium_document_loads via ControlCount)
+}
