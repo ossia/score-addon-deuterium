@@ -65,12 +65,50 @@ enum SamplerControl : int
   ControlCount
 };
 
+// Controls carrying a Process::TimeChooser. Their value is vec2f{x, sync}:
+// x is seconds when sync < 0.5, a fraction of a whole note otherwise —
+// resolved against the current tempo on the execution side. They also accept
+// a plain float (legacy documents, graph modulation), interpreted with the
+// control's historical unit: seconds, except LfoRate where a float is Hz.
+inline constexpr bool isTimeControl(int c) noexcept
+{
+  switch(c)
+  {
+    case FilterEnvAttack:
+    case FilterEnvDecay:
+    case FilterEnvRelease:
+    case Glide:
+    case LfoRate:
+    case LfoDelay:
+      return true;
+    default:
+      return false;
+  }
+}
+
+//! Musical position x (fraction of a whole note) at the given tempo, in
+//! seconds. Matches the interpretation used by score's other time choosers.
+inline constexpr float syncTimeToSeconds(float x, double tempo) noexcept
+{
+  const float q_ratio = 4.f * x; // 1 == a whole note, 0.25 == a quarter
+  const float beat_dur = float(60. / tempo);
+  return q_ratio * beat_dur;
+}
+
 inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
 {
   std::vector<Process::ControlInlet*> v(ControlCount);
   const auto id = [](int c) { return Id<Process::Port>(1 + c); };
   const auto flt = [&](int c, float min, float max, float init, const QString& name) {
     v[c] = new Process::FloatSlider{min, max, init, name, id(c), parent};
+  };
+  const auto time = [&](int c, float min, float max, float init, const QString& name) {
+    auto* tc = new Process::TimeChooser{min, max, init, name, id(c), parent};
+    // The stock TimeChooser defaults to tempo-synced; these controls default
+    // to their historical free-running time in seconds.
+    tc->setValue(ossia::vec2f{init, 0.f});
+    tc->setInit(tc->value());
+    v[c] = tc;
   };
   const auto combo
       = [&](int c, std::vector<std::pair<QString, ossia::value>> alts, int init,
@@ -99,14 +137,15 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
        {QStringLiteral("Bandpass"), 4},
        {QStringLiteral("Notch"), 5}},
       0, QStringLiteral("Filter"));
-  flt(Cutoff, 20.f, 20000.f, 18000.f, QStringLiteral("Cutoff"));
+  v[Cutoff] = new Process::LogFloatSlider{
+      20.f, 20000.f, 18000.f, QStringLiteral("Cutoff"), id(Cutoff), parent};
   flt(Resonance, 0.f, 1.f, 0.f, QStringLiteral("Resonance"));
   flt(FilterKeytrack, 0.f, 1.f, 0.f, QStringLiteral("Filter keytrack"));
   flt(FilterEnvAmount, -1.f, 1.f, 0.f, QStringLiteral("Filter env"));
-  flt(FilterEnvAttack, 0.001f, 5.f, 0.001f, QStringLiteral("Filter env attack"));
-  flt(FilterEnvDecay, 0.001f, 5.f, 0.15f, QStringLiteral("Filter env decay"));
+  time(FilterEnvAttack, 0.001f, 5.f, 0.001f, QStringLiteral("Filter env attack"));
+  time(FilterEnvDecay, 0.001f, 5.f, 0.15f, QStringLiteral("Filter env decay"));
   flt(FilterEnvSustain, 0.f, 1.f, 0.f, QStringLiteral("Filter env sustain"));
-  flt(FilterEnvRelease, 0.001f, 8.f, 0.05f, QStringLiteral("Filter env release"));
+  time(FilterEnvRelease, 0.001f, 8.f, 0.05f, QStringLiteral("Filter env release"));
   flt(VelToCutoff, 0.f, 1.f, 0.f, QStringLiteral("Vel > cutoff"));
 
   flt(VelAmount, 0.f, 1.f, 1.f, QStringLiteral("Vel > volume"));
@@ -125,7 +164,7 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
        {QStringLiteral("Mono"), 1},
        {QStringLiteral("Legato"), 2}},
       0, QStringLiteral("Voices"));
-  flt(Glide, 0.f, 2.f, 0.f, QStringLiteral("Glide"));
+  time(Glide, 0.f, 2.f, 0.f, QStringLiteral("Glide"));
   v[Polyphony] = new Process::IntSlider{
       1, 64, 64, QStringLiteral("Polyphony"), id(Polyphony), parent};
 
@@ -154,9 +193,11 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
        {QStringLiteral("Volume"), 3},
        {QStringLiteral("Pan"), 4}},
       0, QStringLiteral("LFO"));
-  flt(LfoRate, 0.01f, 40.f, 5.f, QStringLiteral("LFO rate"));
+  // Stored as a period so that it can be tempo-synced; a plain float on
+  // the inlet still means Hz (legacy documents).
+  time(LfoRate, 0.025f, 20.f, 0.2f, QStringLiteral("LFO period"));
   flt(LfoDepth, 0.f, 1.f, 0.f, QStringLiteral("LFO depth"));
-  flt(LfoDelay, 0.f, 5.f, 0.f, QStringLiteral("LFO delay"));
+  time(LfoDelay, 0.f, 5.f, 0.f, QStringLiteral("LFO delay"));
 
   combo(
       RoundRobin,

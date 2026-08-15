@@ -218,3 +218,29 @@ TEST_CASE("model: datastream_write_keeps_missing_path", "[deuterium]")
   REQUIRE(target.effect() == path);
   REQUIRE(!target.gigInfo());
 }
+
+// Timing-related controls use Process::TimeChooser so they can be tempo-
+// synced; the cutoff uses a log-scale slider.
+TEST_CASE("model: control_widget_types", "[deuterium]")
+{
+  bootApp();
+  QObject parent;
+  auto controls = Deuterium::Gig::makeSamplerControls(&parent);
+  REQUIRE(controls.size() == std::size_t(Deuterium::Gig::ControlCount));
+
+  for(int i = 0; i < Deuterium::Gig::ControlCount; i++)
+  {
+    if(Deuterium::Gig::isTimeControl(i))
+      REQUIRE((dynamic_cast<Process::TimeChooser*>(controls[i])));
+    else
+      REQUIRE(!(dynamic_cast<Process::TimeChooser*>(controls[i])));
+  }
+  REQUIRE((dynamic_cast<Process::LogFloatSlider*>(
+      controls[Deuterium::Gig::Cutoff])));
+
+  // TimeChooser default: free-running mode with the initial time in seconds
+  auto* lfoRate = controls[Deuterium::Gig::LfoRate];
+  auto v = ossia::convert<ossia::vec2f>(lfoRate->value());
+  REQUIRE(approxEq(v[0], 0.2f));
+  REQUIRE(approxEq(v[1], 0.f)); // widget convention: y == 0 is free-running
+}
