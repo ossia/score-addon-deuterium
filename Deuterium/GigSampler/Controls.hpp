@@ -67,6 +67,7 @@ enum SamplerControl : int
   EnvFromFile,
   Instrument,
   File,
+  VelToPitchEnv,
 
   ControlCount
 };
@@ -196,6 +197,7 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
   flt(Lofi, 0.f, 1.f, 0.f, QStringLiteral("Lo-fi"));
   flt(PitchEnvAmount, -24.f, 24.f, 0.f, QStringLiteral("Pitch env"));
   flt(PitchEnvDecay, 0.001f, 2.f, 0.08f, QStringLiteral("Pitch env decay"));
+  flt(VelToPitchEnv, -1.f, 1.f, 0.f, QStringLiteral("Vel > pitch env"));
 
   combo(
       LfoDest,

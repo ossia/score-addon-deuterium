@@ -116,6 +116,9 @@ void applySamplerControl(SamplerParams& p, int control, const ossia::value& val)
     case PitchEnvDecay:
       flt(p.pitchEnvDecay, 0.001f, 30.f);
       break;
+    case VelToPitchEnv:
+      flt(p.velToPitchEnv, -1.f, 1.f);
+      break;
     case LfoDest:
       num(p.lfoDest, 0, SamplerParams::LfoPan);
       break;
