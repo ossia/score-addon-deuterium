@@ -47,6 +47,12 @@ function(add_deuterium_tool TESTNAME TESTSRCS)
   if(LIBGIG_COMPAT_DIR)
     target_include_directories(${TESTNAME} PRIVATE "${LIBGIG_COMPAT_DIR}/src")
   endif()
+  # External-addon (standalone CI) builds generate stub export headers and
+  # ossia-config.hpp into the root binary dir; only setup_score_plugin()
+  # normally adds it, and the tests do not go through it
+  if(SCORE_ROOT_BINARY_DIR)
+    target_include_directories(${TESTNAME} PRIVATE "${SCORE_ROOT_BINARY_DIR}")
+  endif()
   target_compile_definitions(${TESTNAME} PRIVATE
     PACKAGE="libgig"
     VERSION="${LIBGIG_VERSION_MAJOR}.${LIBGIG_VERSION_MINOR}.${LIBGIG_VERSION_BUILD}"
