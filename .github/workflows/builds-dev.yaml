@@ -52,6 +52,9 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: ossia/score
+          # This addon uses the staged-publish library API: build against the
+          # branch that introduces it until it reaches master.
+          ref: library-staged-publish
           submodules: "recursive"
           path: score
 
