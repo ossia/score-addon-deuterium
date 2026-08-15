@@ -1,3 +1,4 @@
 [submodule "3rdparty/libgig-modified"]
 	path = 3rdparty/libgig-modified
-	url = https://github.com/surge-synthesizer/libgig-modified.git
+	url = https://github.com/jcelerier/libgig-modified.git
+	branch = score-deuterium
