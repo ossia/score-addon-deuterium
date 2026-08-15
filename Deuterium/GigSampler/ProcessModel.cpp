@@ -43,8 +43,37 @@ ProcessModel::ProcessModel(
   const auto parsed = parseInstrumentPath(data);
   m_filePath = parsed.file;
   m_instrument = parsed.instrument;
+  wireInstrumentControl();
   if(!m_filePath.isEmpty())
     startAsyncLoad();
+}
+
+// The Instrument inlet drives which instrument of the file plays: changing
+// it reloads the sample data asynchronously while every other control keeps
+// its value. Called from every constructor once the inlets exist.
+void ProcessModel::wireInstrumentControl()
+{
+  const int idx = 1 + Gig::Instrument;
+  if(idx >= std::ssize(m_inlets))
+    return;
+  auto* ctl = qobject_cast<Process::ControlInlet*>(m_inlets[idx]);
+  if(!ctl)
+    return;
+
+  if(ossia::convert<int>(ctl->value()) != m_instrument)
+    ctl->setValue(m_instrument);
+
+  connect(ctl, &Process::ControlInlet::valueChanged, this, [this](const ossia::value& v) {
+    const int i = ossia::convert<int>(v);
+    if(i == m_instrument)
+      return;
+    m_instrument = i;
+    m_gigInfo.reset();
+    if(!m_filePath.isEmpty())
+      startAsyncLoad();
+    else
+      fileChanged();
+  });
 }
 
 ProcessModel::~ProcessModel()
@@ -76,6 +105,13 @@ void ProcessModel::loadFile(const QString& path, int instrument)
   m_filePath = path;
   m_instrument = instrument;
   m_gigInfo.reset();
+
+  // Keep the Instrument inlet in sync (its change handler no-ops when the
+  // value already matches)
+  if(const int idx = 1 + Gig::Instrument; idx < std::ssize(m_inlets))
+    if(auto* ctl = qobject_cast<Process::ControlInlet*>(m_inlets[idx]))
+      if(ossia::convert<int>(ctl->value()) != instrument)
+        ctl->setValue(instrument);
 
   if(!path.isEmpty())
   {
