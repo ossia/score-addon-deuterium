@@ -1010,6 +1010,69 @@ TEST_CASE("loader: sf2_modulation_generators", "[deuterium]")
   REQUIRE(std::abs(info2->instruments[0].regions[0].vibLfoToPitch) < 1e-6);
 }
 
+// DLS2 conditional chunks: a list whose cdl expression evaluates false must
+// not load (files ship DLS1/DLS2 variants of the same content side by side)
+TEST_CASE("loader: dls_cdl_evaluation", "[deuterium]")
+{
+  using namespace sf2writer;
+  auto makeCdlFile = [](const QString& path, const QByteArray& expr) {
+    QByteArray contents;
+    if(!expr.isEmpty())
+      contents = chunk("cdl ", expr);
+    QByteArray body = list("ins ", contents);
+    QByteArray file;
+    fourcc(file, "RIFF");
+    u32(file, body.size() + 4);
+    fourcc(file, "DLS ");
+    file.append(body);
+    QFile out(path);
+    out.open(QIODevice::WriteOnly);
+    out.write(file);
+    out.close();
+    return path;
+  };
+  auto evalFile = [&](const QString& path) {
+    RIFF::File riff(path.toStdString());
+    RIFF::List* ins = riff.GetFirstSubList();
+    REQUIRE(ins != nullptr);
+    return DLS::EvaluateConditionalChunk(ins);
+  };
+
+  // Constant false / true
+  QByteArray c0;
+  u16(c0, 0x0010);
+  u32(c0, 0);
+  REQUIRE(!evalFile(makeCdlFile(tmp("cdl0.dls"), c0)));
+
+  QByteArray c1;
+  u16(c1, 0x0010);
+  u32(c1, 1);
+  REQUIRE(evalFile(makeCdlFile(tmp("cdl1.dls"), c1)));
+
+  // 2 > 1  (postfix: push 2, push 1, Gt)
+  QByteArray gt;
+  u16(gt, 0x0010);
+  u32(gt, 2);
+  u16(gt, 0x0010);
+  u32(gt, 1);
+  u16(gt, 0x000C);
+  REQUIRE(evalFile(makeCdlFile(tmp("cdlgt.dls"), gt)));
+
+  // Query SupportsDLS2 -> true for us
+  QByteArray q;
+  u16(q, 0x0011);
+  u32(q, 0xf14599e5);
+  u16(q, 0x4689);
+  u16(q, 0x11d2);
+  const uint8_t tail[8] = {0xaf, 0xa6, 0x00, 0xaa, 0x00, 0x24, 0xd8, 0xb6};
+  for(uint8_t byte : tail)
+    u8(q, byte);
+  REQUIRE(evalFile(makeCdlFile(tmp("cdlq.dls"), q)));
+
+  // No cdl chunk at all -> loads
+  REQUIRE(evalFile(makeCdlFile(tmp("cdlnone.dls"), {})));
+}
+
 TEST_CASE("loader: sf2", "[deuterium]")
 {
   const auto path = makeSf2File(tmp("basic.sf2"));
