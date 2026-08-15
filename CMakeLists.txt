@@ -9,6 +9,11 @@ score_common_setup()
 # libgig-modified sources (compiled directly into the plugin)
 set(LIBGIG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/libgig-modified")
 
+if(NOT EXISTS "${LIBGIG_DIR}/configure.ac")
+  message(STATUS "score-addon-deuterium: libgig submodule not initialized, skipping")
+  return()
+endif()
+
 file(STRINGS "${LIBGIG_DIR}/configure.ac" LIBGIG_VERSION_STRINGS REGEX "^m4_define\\(libgig_release.*\\)$")
 string(REGEX MATCH "libgig_release_major, ([^)]*)\\)" _TEMP ${LIBGIG_VERSION_STRINGS})
 set(LIBGIG_VERSION_MAJOR ${CMAKE_MATCH_1})

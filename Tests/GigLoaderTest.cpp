@@ -750,6 +750,19 @@ private Q_SLOTS:
     QCOMPARE(regions[0].velHigh, regions[1].velHigh);
   }
 
+  // libgig LoopEnd is an inclusive last-sample index; the engine's loop.end
+  // is exclusive, so the loader converts
+  void test_gig_loop_end_is_converted_to_exclusive()
+  {
+    const auto path = makeGigFile(tmp("loopend.gig"), {}, 100, 200);
+    auto info = loadGigFileMetadata(path);
+    QVERIFY(info);
+    auto& sample = info->instruments[0].regions[0].sample;
+    QVERIFY(sample.hasLoop);
+    QCOMPARE(sample.loopStart, uint32_t(100));
+    QCOMPARE(sample.loopEnd, uint32_t(201));
+  }
+
   void test_hydrogen_drumkit()
   {
     const auto path = makeHydrogenKit(tmp("mykit"));

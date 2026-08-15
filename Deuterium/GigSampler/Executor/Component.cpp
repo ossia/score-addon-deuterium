@@ -15,6 +15,7 @@
 #include <halp/compat/gamma.hpp>
 #include <libremidi/detail/conversion.hpp>
 
+#include <bitset>
 #include <cmath>
 
 namespace Deuterium::Gig
@@ -56,6 +57,7 @@ class gigsampler_node final : public ossia::graph_node
 {
 public:
   static constexpr int max_voices = 64;
+  static constexpr int max_regions = 4096;
 
   gigsampler_node(ossia::execution_state& st)
       : m_st{st}
@@ -108,21 +110,30 @@ public:
        || m_gigInfo->selectedInstrument >= std::ssize(m_gigInfo->instruments))
       return;
 
+    // One graph cycle can invoke run() once per token request: grow the
+    // buffer up to this token's window and never clear what previous tokens
+    // already rendered.
+    const auto timings = estate.timings(tk);
+    const std::size_t needed = timings.start_sample + timings.length;
+
     this->audio_out->data.set_channels(2);
     for(int i = 0; i < 2; i++)
     {
-      this->audio_out->data.get()[i].clear();
-      this->audio_out->data.get()[i].resize(estate.bufferSize(), 0.);
+      auto& channel = this->audio_out->data.get()[i];
+      if(channel.size() < needed)
+        channel.resize(needed, 0.);
     }
-
-    double* outs[2] = {
-        this->audio_out->data.channel(0).data(),
-        this->audio_out->data.channel(1).data()};
 
     auto& instr = m_gigInfo->instruments[m_gigInfo->selectedInstrument];
 
     for(auto& mess : this->midi_in->data.messages)
     {
+      // Inlet data persists across the run() calls of one cycle: only
+      // consume the messages stamped inside this token's window
+      const auto ts = (int64_t)mess.timestamp;
+      if(ts < timings.start_sample || ts >= timings.start_sample + timings.length)
+        continue;
+
       uint8_t data[4];
       int n = cmidi2_convert_single_ump_to_midi1((uint8_t*)data, 3, mess.data);
       if(n != 3)
@@ -155,9 +166,8 @@ public:
       }
     }
 
-    const auto timings = estate.timings(tk);
-    double* out_l = outs[0] + timings.start_sample;
-    double* out_r = outs[1] + timings.start_sample;
+    double* out_l = this->audio_out->data.channel(0).data() + timings.start_sample;
+    double* out_r = this->audio_out->data.channel(1).data() + timings.start_sample;
 
     const auto& p = m_params;
     const int64_t xfadeFrames = (int64_t)(p.loopXfade * m_sampleRate);
@@ -313,7 +323,7 @@ private:
     const auto& p = m_params;
     m_noteVelocity[note & 127] = (uint8_t)velocity;
 
-    const int regionCount = std::min<int>(instr.regions.size(), 512);
+    const int regionCount = std::min<int>(instr.regions.size(), max_regions);
 
     // 1. chokes: any group this hit triggers cuts what currently sounds in it
     for(int i = 0; i < regionCount; i++)
@@ -375,7 +385,7 @@ private:
 
     // 3. zone matching with round-robin/random alternation.
     // Alternatives share the exact same key and velocity zone.
-    bool used[512]{};
+    std::bitset<max_regions> used;
     for(int i = 0; i < regionCount; i++)
     {
       if(used[i])
@@ -454,8 +464,10 @@ private:
 
     // Release triggers: dedicated regions fired on note-off (gig)
     const int velocity = m_noteVelocity[note & 127];
-    for(auto& region : instr.regions)
+    const int regionCount = std::min<int>(instr.regions.size(), max_regions);
+    for(int i = 0; i < regionCount; i++)
     {
+      auto& region = instr.regions[i];
       if(!region.releaseTrigger || region.muted)
         continue;
       if(!regionMatches(region, note, velocity))
@@ -484,12 +496,12 @@ private:
         if(!v.playing)
           return v;
 
-    // At the cap (or full pool): steal the oldest voice
-    gig_voice* oldest = &m_voices[0];
+    // At the cap (or full pool): steal the oldest playing voice
+    gig_voice* oldest = nullptr;
     for(auto& v : m_voices)
-      if(v.playing && v.startOrder < oldest->startOrder)
+      if(v.playing && (!oldest || v.startOrder < oldest->startOrder))
         oldest = &v;
-    return *oldest;
+    return oldest ? *oldest : m_voices[0];
   }
 
   void start_voice(
