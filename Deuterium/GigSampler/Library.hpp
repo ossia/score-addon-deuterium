@@ -10,7 +10,6 @@
 
 #include <Deuterium/GigSampler/GigLoader.hpp>
 #include <Deuterium/GigSampler/ProcessModel.hpp>
-#include <Deuterium/ProcessMetadata.hpp>
 
 namespace Deuterium::Gig
 {
@@ -47,16 +46,6 @@ class LibraryHandler final
         Metadata<PrettyName_k, Deuterium::Gig::ProcessModel>::get().toStdString(), node,
         ctx);
 
-    // The legacy drumkit process stays registered so old documents load, but
-    // it must not be user-creatable: clear its node key as its removed
-    // library handler used to do
-    if(auto legacy = model.find(Metadata<ConcreteKey_k, Deuterium::ProcessModel>::get());
-       legacy != QModelIndex{})
-    {
-      auto& legacyNode
-          = *reinterpret_cast<Library::ProcessNode*>(legacy.internalPointer());
-      legacyNode.key = {};
-    }
   }
 
   std::function<void()> asyncAddPath(std::string_view path) override
