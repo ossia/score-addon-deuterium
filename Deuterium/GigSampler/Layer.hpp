@@ -108,7 +108,9 @@ struct UiBuilder final : Process::LayoutBuilderBase
       return;
     }
     w->setParentItem(cell);
-    w->setPos((cell_w - 35.) / 2., 14.);
+    // Same widget y as DefaultControlLayouts::knob() so the knobs of a row
+    // line up with the controls built through makePort
+    w->setPos((cell_w - 35.) / 2., 6.);
 
     auto* lab = makeLabel(ctl->name().toStdString());
     lab->setParentItem(cell);
@@ -118,7 +120,7 @@ struct UiBuilder final : Process::LayoutBuilderBase
     if(auto* pf = portFactory.get(ctl->concreteKey()))
       if(auto* dot = pf->makePortItem(
              *ctl, static_cast<const Process::Context&>(doc), cell, &context))
-        dot->setPos(0., 24.);
+        dot->setPos(0., 17.);
   }
 
   // A fixed-column grid: every control sits in a uniform, centred cell so
