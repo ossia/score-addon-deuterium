@@ -343,6 +343,9 @@ void convertAndPrune(
         if(region.sampleStartOffset > 0)
           region.sampleStartOffset = (uint32_t)std::clamp<int64_t>(
               std::llround(region.sampleStartOffset * conv.ratio), 0, INT32_MAX);
+        if(region.sampleEndOffset > 0)
+          region.sampleEndOffset = (uint32_t)std::clamp<int64_t>(
+              std::llround(region.sampleEndOffset * conv.ratio), 0, INT32_MAX);
       }
 
       // Clamp loop points to the decoded frame count: files can declare
@@ -1054,7 +1057,8 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
       if(fc < 13500 || qCb > 0)
       {
         region.vcfEnabled = true;
-        region.vcfCutoff = frequencyToVcfCutoff(8.176 * std::pow(2.0, fc / 1200.0));
+        region.vcfCutoffHz = 8.176 * std::pow(2.0, fc / 1200.0);
+        region.vcfCutoff = frequencyToVcfCutoff(region.vcfCutoffHz);
         region.vcfQCb = qCb;
       }
 
@@ -1064,6 +1068,65 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
         region.vibLfoToPitch = vibCents;
         region.vibLfoFreq = (float)iz->GetFreqVibLfo(pz);
         region.vibLfoDelay = (float)iz->GetDelayVibLfo(pz);
+      }
+
+      // File-specified modLfo (tremolo / filter wobble / pitch)
+      {
+        const int toPitch = iz->GetModLfoToPitch(pz);
+        const int toFc = iz->GetModLfoToFilterFc(pz);
+        const double toVol = iz->GetModLfoToVolume(pz);
+        if(toPitch != 0 || toFc != 0 || toVol != 0.)
+        {
+          region.modLfoToPitch = toPitch;
+          region.modLfoToFc = toFc;
+          region.modLfoToVol = (float)toVol;
+          region.modLfoFreq = (float)iz->GetFreqModLfo(pz);
+          region.modLfoDelay = (float)iz->GetDelayModLfo(pz);
+        }
+      }
+
+      // Modulation envelope -> pitch / cutoff
+      {
+        const int toPitch = iz->GetModEnvToPitch(pz);
+        const int toFc = iz->GetModEnvToFilterFc(pz);
+        if(toPitch != 0 || toFc != 0)
+        {
+          region.modEnvToPitch = toPitch;
+          region.modEnvToFc = toFc;
+          region.eg2Delay = (float)iz->GetEG2PreAttackDelay(pz);
+          region.eg2Attack = (float)iz->GetEG2Attack(pz);
+          region.eg2Hold = (float)iz->GetEG2Hold(pz);
+          region.eg2Decay = (float)iz->GetEG2Decay(pz);
+          region.eg2Sustain
+              = std::clamp(iz->GetEG2Sustain(pz), 0, 1000) / 1000.f;
+          region.eg2Release = (float)iz->GetEG2Release(pz);
+        }
+      }
+
+      // Instrument-zone key / velocity overrides
+      region.forcedKey = iz->keynum;
+      region.forcedVelocity = iz->velocity;
+
+      // Default velocity->cutoff modulator (SF2 2.01 default #2, -2400
+      // cents); a bank modulator with the same source and destination
+      // supersedes it, including with amount 0 to disable it
+      region.velToFcCents = -2400.f;
+      for(const auto& m : iz->modulators)
+      {
+        if(m.ModDestOper == sf2::INITIAL_FILTER_FC && !m.ModSrcOper.MidiPalete
+           && m.ModSrcOper.Index == sf2::Modulator::NOTE_ON_VELOCITY)
+        {
+          region.velToFcCents = (float)(int16_t)m.ModAmount;
+          break;
+        }
+      }
+
+      // Trailing frames trimmed off the sample end (offsets are <= 0)
+      {
+        const int64_t endOff = (int64_t)iz->endAddrsOffset
+                               + 32768ll * (int64_t)iz->endAddrsCoarseOffset;
+        if(endOff < 0)
+          region.sampleEndOffset = (uint32_t)std::min<int64_t>(-endOff, INT32_MAX);
       }
 
       region.sample.sampleRate = smp->SampleRate;

@@ -986,6 +986,30 @@ TEST_CASE("loader: sf2_loop_until_release", "[deuterium]")
   REQUIRE(!info2->instruments[0].regions[0].sample.loopUntilRelease);
 }
 
+// vibLfo / modLfo / mod-env generators reach the region; the default
+// velocity->cutoff modulator amount is present; keynum pins the key
+TEST_CASE("loader: sf2_modulation_generators", "[deuterium]")
+{
+  // gen 6 vibLfoToPitch=50, gen 13 modLfoToVolume=120 cB, gen 7
+  // modEnvToPitch=1200, gen 46 keynum=70
+  const auto path = makeSf2File(
+      tmp("modgens.sf2"), 0, {{6, 50}, {13, 120}, {7, 1200}, {46, 70}});
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto& r = info->instruments[0].regions[0];
+  REQUIRE(std::abs(r.vibLfoToPitch - 50.f) < 1e-6);
+  REQUIRE(std::abs(r.modLfoToVol - 120.f) < 1e-6);
+  REQUIRE(std::abs(r.modEnvToPitch - 1200.f) < 1e-6);
+  REQUIRE(r.forcedKey == 70);
+  REQUIRE(std::abs(r.velToFcCents - -2400.f) < 1e-6);
+
+  const auto path2 = makeSf2File(tmp("nomodgens.sf2"));
+  auto info2 = loadGigFileMetadata(path2);
+  REQUIRE(info2);
+  REQUIRE(info2->instruments[0].regions[0].forcedKey == -1);
+  REQUIRE(std::abs(info2->instruments[0].regions[0].vibLfoToPitch) < 1e-6);
+}
+
 TEST_CASE("loader: sf2", "[deuterium]")
 {
   const auto path = makeSf2File(tmp("basic.sf2"));
