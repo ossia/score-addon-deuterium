@@ -9,7 +9,12 @@ if(SCORE_STATIC_PLUGINS)
   return()
 endif()
 
-find_package(${QT_VERSION} REQUIRED COMPONENTS Core Test Xml)
+# External CI builds use a static Qt without QtTest: skip the tests there.
+find_package(${QT_VERSION} COMPONENTS Core Test Xml)
+if(NOT TARGET ${QT_PREFIX}::Test OR NOT TARGET ${QT_PREFIX}::Xml)
+  message(STATUS "score-addon-deuterium: QtTest/QtXml not available, skipping tests")
+  return()
+endif()
 set(CMAKE_AUTOMOC ON)
 
 set(DEUTERIUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
