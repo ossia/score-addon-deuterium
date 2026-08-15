@@ -131,6 +131,12 @@ void applySamplerControl(SamplerParams& p, int control, const ossia::value& val)
     case RoundRobin:
       num(p.roundRobin, 0, SamplerParams::RRRandom);
       break;
+    case Chromatic:
+      p.chromatic = ossia::convert<bool>(val);
+      break;
+    case ChromaticRoot:
+      num(p.chromaticRoot, 0, 127);
+      break;
     default:
       break;
   }

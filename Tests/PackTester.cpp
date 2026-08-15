@@ -137,7 +137,10 @@ int main(int argc, char** argv)
     else if(fi.isDir())
     {
       QDirIterator it{
-          p, {"*.gig", "*.dls", "*.sf2", "drumkit.xml"}, QDir::Files,
+          p,
+          {"*.gig", "*.GIG", "*.dls", "*.DLS", "*.sf2", "*.SF2", "*.kmp",
+           "*.KMP", "drumkit.xml"},
+          QDir::Files,
           QDirIterator::Subdirectories};
       while(it.hasNext())
         files.push_back(it.next());

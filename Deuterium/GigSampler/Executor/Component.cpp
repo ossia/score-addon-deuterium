@@ -341,6 +341,9 @@ private:
     const auto& p = m_params;
     m_noteVelocity[note & 127] = (uint8_t)velocity;
 
+    // Chromatic mode: every key plays what is mapped at the root, repitched
+    const int matchNote = p.chromatic ? std::clamp(p.chromaticRoot, 0, 127) : note;
+
     const int regionCount = std::min<int>(instr.regions.size(), max_regions);
 
     // A key with no mapped region is a no-op: in particular it must not
@@ -351,7 +354,7 @@ private:
       {
         auto& region = instr.regions[i];
         anyMatch = !region.muted && !region.releaseTrigger
-                   && regionMatches(region, note, velocity);
+                   && regionMatches(region, matchNote, velocity);
       }
       if(!anyMatch)
         return;
@@ -363,7 +366,7 @@ private:
       auto& region = instr.regions[i];
       if(region.muted || region.releaseTrigger || region.chokeGroup < 0)
         continue;
-      if(!regionMatches(region, note, velocity))
+      if(!regionMatches(region, matchNote, velocity))
         continue;
       for(auto& v : m_voices)
         if(v.playing && !v.choked && v.region
@@ -388,10 +391,11 @@ private:
         for(auto& v : m_voices)
         {
           if(v.playing && !v.released && !v.choked && v.region
-             && v.region->pitchTrack && note >= v.region->keyLow
-             && note <= v.region->keyHigh)
+             && v.region->pitchTrack && matchNote >= v.region->keyLow
+             && matchNote <= v.region->keyHigh)
           {
-            const double target = basePitchSemitones(*v.region, p, note);
+            const double target
+                = basePitchSemitones(*v.region, p, matchNote) + (note - matchNote);
             v.glide.start(v.glide.current, target, true);
             v.note = note;
             m_lastPitchSemis = target;
@@ -431,7 +435,7 @@ private:
       auto& region = instr.regions[i];
       if(region.muted || region.releaseTrigger)
         continue;
-      if(!regionMatches(region, note, velocity))
+      if(!regionMatches(region, matchNote, velocity))
         continue;
 
       int policy = 0;
@@ -453,7 +457,7 @@ private:
 
       if(policy == 0 || region.altGroup < 0 || region.altCount <= 1)
       {
-        start_voice(region, note, velocity, false, legatoTransfer);
+        start_voice(region, note, matchNote, velocity, false, legatoTransfer);
         continue;
       }
 
@@ -473,7 +477,7 @@ private:
       }
 
       if(region.altIndex == pick)
-        start_voice(region, note, velocity, false, legatoTransfer);
+        start_voice(region, note, matchNote, velocity, false, legatoTransfer);
     }
   }
 
@@ -495,15 +499,18 @@ private:
 
     // Release triggers: dedicated regions fired on note-off (gig)
     const int velocity = m_noteVelocity[note & 127];
+    const int matchNote = m_params.chromatic
+                              ? std::clamp(m_params.chromaticRoot, 0, 127)
+                              : note;
     const int regionCount = std::min<int>(instr.regions.size(), max_regions);
     for(int i = 0; i < regionCount; i++)
     {
       auto& region = instr.regions[i];
       if(!region.releaseTrigger || region.muted)
         continue;
-      if(!regionMatches(region, note, velocity))
+      if(!regionMatches(region, matchNote, velocity))
         continue;
-      start_voice(region, note, velocity, true, false);
+      start_voice(region, note, matchNote, velocity, true, false);
     }
   }
 
@@ -536,8 +543,8 @@ private:
   }
 
   void start_voice(
-      const GigRegion& region, int note, int velocity, bool fromRelease,
-      bool legatoTransfer = false) noexcept
+      const GigRegion& region, int note, int matchNote, int velocity,
+      bool fromRelease, bool legatoTransfer = false) noexcept
   {
     if(!region.sample.data || region.sample.data->empty()
        || (*region.sample.data)[0].empty())
@@ -556,8 +563,10 @@ private:
     voice.chokeGain = 1.0;
     voice.oneShotEff = region.oneShot || fromRelease;
 
-    // Pitch: static part + glide start; live modulation comes per block
-    const double base = basePitchSemitones(region, p, note);
+    // Pitch: static part (matched note for keytracking, plus the chromatic
+    // distance to the played note) + glide start; live modulation per block
+    const double base
+        = basePitchSemitones(region, p, matchNote) + (note - matchNote);
     voice.randomSemis = region.randomPitch > 0
                             ? region.randomPitch * (2.0 * random01() - 1.0)
                             : 0.;

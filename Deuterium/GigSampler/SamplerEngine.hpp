@@ -104,6 +104,11 @@ struct SamplerParams
     RRRandom
   };
   int roundRobin{RRFromFile};
+
+  // Chromatic mode: every key plays the region(s) mapped at chromaticRoot,
+  // repitched by the distance to the root (MPC 16-levels / SP multipitch)
+  bool chromatic{false};
+  int chromaticRoot{60};
 };
 
 inline double semitonesToRatio(double st) noexcept

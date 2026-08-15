@@ -22,7 +22,8 @@ class LibraryHandler final
 
   QSet<QString> acceptedFiles() const noexcept override
   {
-    return {"gig", "dls", "sf2", "xml"};
+    return {"gig", "dls", "sf2",  "xml", "kmp",
+            "wav", "flac", "ogg", "aiff", "aif", "mp3"};
   }
 
   Library::Subcategories categories;
@@ -180,7 +181,10 @@ class DropHandler final : public Process::ProcessDropHandler
 
   QSet<QString> fileExtensions() const noexcept override
   {
-    return {"gig", "dls", "sf2", "xml"};
+    // Plain audio files are deliberately absent: those drops belong to the
+    // Sound process; audio files are still playable by dragging them from
+    // this sampler's library section
+    return {"gig", "dls", "sf2", "xml", "kmp"};
   }
 
   void dropPath(
@@ -189,7 +193,7 @@ class DropHandler final : public Process::ProcessDropHandler
   {
     const QFileInfo info{filename.absolute};
     const auto ext = info.suffix().toLower();
-    if(ext != "gig" && ext != "dls" && ext != "sf2")
+    if(ext != "gig" && ext != "dls" && ext != "sf2" && ext != "kmp")
     {
       // Of the .xml files, only Hydrogen drumkits are ours
       if(ext != "xml"

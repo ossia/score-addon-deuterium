@@ -8,6 +8,7 @@
 #include <QFileInfo>
 
 #include <DLS.h>
+#include <Korg.h>
 #include <SF.h>
 #include <gig.h>
 
@@ -26,8 +27,16 @@ enum class SampleFileFormat
   Gig,
   Dls,
   Sf2,
-  Hydrogen
+  Hydrogen,
+  Korg,
+  AudioFile
 };
+
+bool isPlainAudioExtension(const QString& ext)
+{
+  return ext == "wav" || ext == "flac" || ext == "ogg" || ext == "aiff"
+         || ext == "aif" || ext == "mp3";
+}
 
 SampleFileFormat formatForPath(const QString& filePath)
 {
@@ -39,6 +48,10 @@ SampleFileFormat formatForPath(const QString& filePath)
       return SampleFileFormat::Sf2;
     if(ext == "xml")
       return SampleFileFormat::Hydrogen;
+    if(ext == "kmp")
+      return SampleFileFormat::Korg;
+    if(isPlainAudioExtension(ext))
+      return SampleFileFormat::AudioFile;
     return SampleFileFormat::Gig;
   };
 
@@ -1287,6 +1300,162 @@ bool loadSamples_hydrogen(
   return true;
 }
 
+/////////////////////////////
+// KORG .KMP multisamples
+/////////////////////////////
+
+// A .KMP maps contiguous key ranges to mono .KSF sample files; regions are
+// chained by TopKey (a region starts right above the previous one's top).
+std::shared_ptr<GigFileInfo>
+loadMetadata_korg(const QString& filePath, int instrumentIndex)
+{
+  Korg::KMPInstrument kmp(filePath.toStdString());
+
+  auto info = std::make_shared<GigFileInfo>();
+  info->filePath = filePath.toStdString();
+  info->selectedInstrument = 0;
+  info->name = kmp.Name();
+  if(info->name.empty())
+    info->name = QFileInfo(filePath).completeBaseName().toStdString();
+
+  GigInstrument instr;
+  instr.name = info->name;
+
+  int keyLow = 0;
+  for(int i = 0; i < kmp.GetRegionCount(); i++)
+  {
+    Korg::KMPRegion* rgn = kmp.GetRegion(i);
+    if(!rgn)
+      continue;
+    const int keyHigh = std::clamp<int>(rgn->TopKey, 0, 127);
+
+    // "SKIPPEDSAMPL" and "INTERNALnnnn" reference samples that only exist
+    // inside the original hardware: nothing to load
+    const auto& sampleName = rgn->SampleFileName;
+    const bool resolvable = sampleName.rfind("SKIPPEDSAMPL", 0) != 0
+                            && sampleName.rfind("INTERNAL", 0) != 0;
+    if(resolvable && keyLow <= keyHigh)
+    {
+      GigRegion region;
+      region.keyLow = (uint8_t)std::clamp(keyLow, 0, 127);
+      region.keyHigh = (uint8_t)keyHigh;
+      region.pitchTrack = rgn->Transpose;
+      region.sample.midiUnityNote = std::min<uint32_t>(rgn->OriginalKey, 127);
+      region.sample.fineTune = std::clamp<int>(rgn->Tune, -99, 99);
+      region.pan = (int8_t)std::clamp<int>(rgn->Pan, -64, 63);
+      region.sample.sourceFile = rgn->FullSampleFileName();
+      sanitizeRegion(region);
+      instr.regions.push_back(std::move(region));
+    }
+    keyLow = keyHigh + 1;
+  }
+
+  if(instr.regions.empty())
+    return {};
+  info->instruments.push_back(std::move(instr));
+  return info;
+}
+
+// Phase 2 for KORG: read each referenced .KSF once (they are shared between
+// KMPs of a bank), also picking up the loop points stored in the sample file
+bool collectRawBuffers_korg(
+    GigFileInfo& info, std::vector<RawSampleBuffer>& rawBuffers,
+    const std::shared_ptr<std::atomic<bool>>& cancelled)
+{
+  auto& destInstr = info.instruments[info.selectedInstrument];
+  std::unordered_map<std::string, std::size_t> seen;
+
+  for(std::size_t regionIdx = 0; regionIdx < destInstr.regions.size(); regionIdx++)
+  {
+    if(cancelled && cancelled->load(std::memory_order_relaxed))
+      return false;
+
+    auto& region = destInstr.regions[regionIdx];
+    const auto& src = region.sample.sourceFile;
+    if(src.empty())
+      continue;
+
+    if(auto it = seen.find(src); it != seen.end())
+    {
+      auto& raw = rawBuffers[it->second];
+      raw.regionIndices.push_back((int)regionIdx);
+      region.sample.sampleRate = raw.sourceRate;
+      continue;
+    }
+
+    try
+    {
+      Korg::KSFSample ksf(src);
+      // The proprietary Korg sample compression is not implemented by libgig
+      if(ksf.IsCompressed())
+        continue;
+
+      const auto buf = ksf.LoadSampleData();
+      if(buf.pStart && buf.Size > 0)
+      {
+        RawSampleBuffer raw;
+        raw.data.resize(buf.Size);
+        std::memcpy(raw.data.data(), buf.pStart, buf.Size);
+        raw.channels = std::max<int>(1, ksf.Channels);
+        raw.bitDepth = ksf.BitDepth;
+        raw.totalSamples = ksf.SamplePoints;
+        raw.sourceRate = ksf.SampleRate;
+        raw.regionIndices.push_back((int)regionIdx);
+
+        region.sample.sampleRate = ksf.SampleRate;
+        if(ksf.LoopEnd > ksf.LoopStart
+           && (int64_t)ksf.LoopEnd <= (int64_t)ksf.SamplePoints)
+        {
+          region.sample.hasLoop = true;
+          region.sample.loopStart = ksf.LoopStart;
+          region.sample.loopEnd = ksf.LoopEnd;
+        }
+
+        seen[src] = rawBuffers.size();
+        rawBuffers.push_back(std::move(raw));
+      }
+      ksf.ReleaseSampleData();
+    }
+    catch(...)
+    {
+      // Missing or unreadable .KSF: the region is pruned with the rest
+    }
+  }
+  return true;
+}
+
+/////////////////////////////
+// Plain audio files
+/////////////////////////////
+
+// A bare wav/flac/... maps to one full-range chromatic region rooted at C4;
+// phase 2 decodes it like a Hydrogen layer.
+std::shared_ptr<GigFileInfo> loadMetadata_audiofile(const QString& filePath)
+{
+  if(!QFileInfo::exists(filePath))
+    return {};
+
+  auto info = std::make_shared<GigFileInfo>();
+  info->filePath = filePath.toStdString();
+  info->selectedInstrument = 0;
+  info->name = QFileInfo(filePath).completeBaseName().toStdString();
+
+  GigInstrument instr;
+  instr.name = info->name;
+
+  GigRegion region;
+  region.keyLow = 0;
+  region.keyHigh = 127;
+  region.pitchTrack = true;
+  region.sample.midiUnityNote = 60;
+  region.sample.sourceFile = filePath.toStdString();
+  sanitizeRegion(region);
+  instr.regions.push_back(std::move(region));
+
+  info->instruments.push_back(std::move(instr));
+  return info;
+}
+
 }
 
 /////////////////////////////
@@ -1318,6 +1487,24 @@ std::vector<std::string> listInstruments(const QString& filePath)
       names.push_back(info->name);
     return names;
   }
+  if(format == SampleFileFormat::Korg)
+  {
+    try
+    {
+      if(auto info = loadMetadata_korg(filePath, 0))
+        names.push_back(info->name);
+    }
+    catch(...)
+    {
+    }
+    return names;
+  }
+  if(format == SampleFileFormat::AudioFile)
+  {
+    if(QFileInfo::exists(filePath))
+      names.push_back(QFileInfo(filePath).completeBaseName().toStdString());
+    return names;
+  }
 
   try
   {
@@ -1346,6 +1533,8 @@ std::vector<std::string> listInstruments(const QString& filePath)
         break;
       }
       case SampleFileFormat::Hydrogen:
+      case SampleFileFormat::Korg:
+      case SampleFileFormat::AudioFile:
         // handled before the RIFF file is opened
         break;
     }
@@ -1367,6 +1556,10 @@ QString formatName(const QString& filePath)
       return QStringLiteral("SF2");
     case SampleFileFormat::Hydrogen:
       return QStringLiteral("Drumkit");
+    case SampleFileFormat::Korg:
+      return QStringLiteral("KORG");
+    case SampleFileFormat::AudioFile:
+      return QStringLiteral("Audio");
     case SampleFileFormat::Gig:
       break;
   }
@@ -1386,6 +1579,10 @@ loadGigFileMetadata(const QString& filePath, int instrumentIndex)
         return loadMetadata_sf2(filePath, instrumentIndex);
       case SampleFileFormat::Hydrogen:
         return loadMetadata_hydrogen(filePath, instrumentIndex);
+      case SampleFileFormat::Korg:
+        return loadMetadata_korg(filePath, instrumentIndex);
+      case SampleFileFormat::AudioFile:
+        return loadMetadata_audiofile(filePath);
       case SampleFileFormat::Gig:
         return loadMetadata_gig(filePath, instrumentIndex);
     }
@@ -1436,9 +1633,13 @@ std::shared_ptr<GigFileInfo> loadGigFileSamples(
         ok = collectRawBuffers_sf2(*info, rawBuffers, cancelled);
         break;
       case SampleFileFormat::Hydrogen:
+      case SampleFileFormat::AudioFile:
         // Decodes external audio files directly; nothing to convert, but the
         // shared pruning of empty regions below still applies
         ok = loadSamples_hydrogen(*info, targetRate, cancelled);
+        break;
+      case SampleFileFormat::Korg:
+        ok = collectRawBuffers_korg(*info, rawBuffers, cancelled);
         break;
       case SampleFileFormat::Gig:
         ok = collectRawBuffers_gig(*info, rawBuffers, cancelled);
