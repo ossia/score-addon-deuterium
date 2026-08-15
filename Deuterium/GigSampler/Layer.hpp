@@ -24,8 +24,6 @@
 #include <score/graphics/widgets/QGraphicsCombo.hpp>
 #include <score/model/Skin.hpp>
 
-#include <QFileInfo>
-
 #include <Deuterium/GigSampler/Controls.hpp>
 #include <Deuterium/GigSampler/GigLoader.hpp>
 #include <Deuterium/GigSampler/ProcessModel.hpp>
@@ -121,13 +119,6 @@ struct UiBuilder final : Process::LayoutBuilderBase
     for(int c : controls)
       knobOrControl(g, c);
   }
-
-  // A small section title inside a page.
-  void section(QGraphicsItem* parent, std::string_view name)
-  {
-    auto* lab = makeLabel(name);
-    lab->setParentItem(parent);
-  }
 };
 }
 
@@ -147,30 +138,8 @@ public:
   }
 
 private:
-  QString title() const
-  {
-    const auto& path = m_model.effect();
-    if(path.isEmpty())
-      return QStringLiteral("No file loaded");
-
-    QString t = QFileInfo{path}.completeBaseName();
-    if(auto gi = m_model.gigInfo())
-    {
-      const int idx = gi->selectedInstrument;
-      if(idx >= 0 && idx < std::ssize(gi->instruments)
-         && !gi->instruments[idx].name.empty())
-      {
-        t += QStringLiteral(" — ");
-        t += QString::fromStdString(gi->instruments[idx].name);
-      }
-    }
-    return t;
-  }
-
   void refresh()
   {
-    if(m_title)
-      m_title->setText(title());
     if(m_instruments)
     {
       m_instruments->array = instrumentNames();
@@ -250,9 +219,6 @@ private:
           if(auto* dot = pf->makePortItem(*ctl, m_ctx, cell, this))
             dot->setPos(0., 4.);
       }
-
-      m_title = new score::SimpleTextItem{Process::labelBrush().main, header};
-      m_title->setText(title());
     }
 
     auto* tabs = b.start<score::GraphicsTabLayout>(main, 3.);
@@ -279,7 +245,6 @@ private:
       auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
       page->setBrush(skin.Background2.main);
       b.grid(page, 5, {FilterType, Cutoff, Resonance, FilterKeytrack, VelToCutoff});
-      b.section(page, "Envelope");
       b.grid(
           page, 5,
           {FilterEnvAmount, FilterEnvAttack, FilterEnvDecay, FilterEnvSustain,
@@ -288,9 +253,7 @@ private:
     {
       auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
       page->setBrush(skin.Background2.main);
-      b.section(page, "Envelope");
       b.grid(page, 5, {EnvFromFile, Attack, Decay, Sustain, Release});
-      b.section(page, "Velocity & pitch");
       b.grid(page, 5, {VelAmount, VelCurve, VelXfade, PitchEnvAmount, PitchEnvDecay});
     }
     {
@@ -306,7 +269,6 @@ private:
 
   const ProcessModel& m_model;
   const Process::Context& m_ctx;
-  score::SimpleTextItem* m_title{};
   score::QGraphicsCombo* m_instruments{};
 };
 

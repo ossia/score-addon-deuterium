@@ -859,6 +859,8 @@ Component::Component(
       const float b = node->m_feedback[i][1];
       if(dynamic_cast<Process::TimeChooser*>(ctl))
         ctl->setExecutionValue(ossia::vec2f{a, b});
+      else if(i == EnvFromFile) // a bool-valued combo box
+        ctl->setExecutionValue(a != 0.f);
       else if(dynamic_cast<Process::Toggle*>(ctl))
         ctl->setExecutionValue(a != 0.f);
       else if(

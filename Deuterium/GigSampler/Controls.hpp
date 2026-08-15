@@ -222,8 +222,11 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
   v[ChromaticRoot] = new Process::IntSlider{
       0, 127, 60, QStringLiteral("Chromatic root"), id(ChromaticRoot), parent};
 
-  v[EnvFromFile] = new Process::Toggle{
-      true, QStringLiteral("Env from file"), id(EnvFromFile), parent};
+  // The underlying value stays a bool so the execution side and historical
+  // documents are unaffected by the switch from a toggle to a selector.
+  v[EnvFromFile] = new Process::ComboBox{
+      {{QStringLiteral("From file"), true}, {QStringLiteral("Custom"), false}}, true,
+      QStringLiteral("Envelope source"), id(EnvFromFile), parent};
 
   // Which instrument of the loaded file plays; switching reloads only the
   // sample data, every other control keeps its value.
