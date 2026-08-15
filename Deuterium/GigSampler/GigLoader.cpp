@@ -76,6 +76,10 @@ void sanitizeRegion(GigRegion& r)
   r.randomPitch
       = std::isfinite(r.randomPitch) ? std::clamp(r.randomPitch, 0., 12.) : 0.;
   r.sample.fineTune = std::clamp(r.sample.fineTune, -1200, 1200);
+  // The engine subtracts this from the note and exponentiates the result:
+  // out-of-range values from corrupt files would blow up the pitch ratio
+  if(r.sample.midiUnityNote > 127)
+    r.sample.midiUnityNote = 60;
 }
 
 // Raw PCM read back from a file, waiting to be converted to double arrays
@@ -434,13 +438,15 @@ loadMetadata_gig(const QString& filePath, int instrumentIndex)
       // Sample metadata (but NOT the actual audio data)
       auto* smp = dimRgn->pSample;
       region.sample.sampleRate = smp->SamplesPerSecond;
-      region.sample.midiUnityNote = smp->MIDIUnityNote;
+      region.sample.midiUnityNote = std::min<uint32_t>(smp->MIDIUnityNote, 127);
       region.sample.fineTune = smp->FineTune;
       if(smp->Loops > 0)
       {
         region.sample.hasLoop = true;
         region.sample.loopStart = smp->LoopStart;
-        region.sample.loopEnd = smp->LoopEnd;
+        // libgig's LoopEnd is the inclusive last sample of the loop; the
+        // engine wraps at loop.end exclusively
+        region.sample.loopEnd = smp->LoopEnd + 1;
         region.sample.loopType = static_cast<int>(smp->LoopType);
       }
       // sample.data left empty intentionally
@@ -807,8 +813,9 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
           iz->GetUnityNote() - iz->GetCoarseTune(pz), 0, 127);
       region.sample.fineTune = iz->GetFineTune(pz);
       region.pan = (int8_t)std::clamp(iz->GetPan(pz), -64, 63);
-      region.sampleStartOffset = (uint16_t)std::clamp(
-          iz->startAddrsOffset + 32768 * iz->startAddrsCoarseOffset, 0, 65535);
+      region.sampleStartOffset = (uint16_t)std::clamp<int64_t>(
+          (int64_t)iz->startAddrsOffset + 32768ll * iz->startAddrsCoarseOffset, 0,
+          65535);
 
       // EG1: hold folded into the decay stage (our envelope has no hold)
       region.eg1Attack = iz->GetEG1Attack(pz);

@@ -43,7 +43,9 @@ struct SamplerParams
   float filterEnvAmount{0.f}; // -1..1, scaled to +-4 octaves
   float filterEnvAttack{0.001f};
   float filterEnvDecay{0.15f};
-  float filterEnvSustain{1.f};
+  // Sustain 0 so that the decay stage actually sweeps: the envelope opens the
+  // filter by `filterEnvAmount` and closes again over `filterEnvDecay`
+  float filterEnvSustain{0.f};
   float filterEnvRelease{0.05f};
   float velToCutoff{0.f}; // 0..1
 

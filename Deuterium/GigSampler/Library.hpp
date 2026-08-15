@@ -10,6 +10,7 @@
 
 #include <Deuterium/GigSampler/GigLoader.hpp>
 #include <Deuterium/GigSampler/ProcessModel.hpp>
+#include <Deuterium/ProcessMetadata.hpp>
 
 namespace Deuterium::Gig
 {
@@ -44,6 +45,17 @@ class LibraryHandler final
     categories.init(
         Metadata<PrettyName_k, Deuterium::Gig::ProcessModel>::get().toStdString(), node,
         ctx);
+
+    // The legacy drumkit process stays registered so old documents load, but
+    // it must not be user-creatable: clear its node key as its removed
+    // library handler used to do
+    if(auto legacy = model.find(Metadata<ConcreteKey_k, Deuterium::ProcessModel>::get());
+       legacy != QModelIndex{})
+    {
+      auto& legacyNode
+          = *reinterpret_cast<Library::ProcessNode*>(legacy.internalPointer());
+      legacyNode.key = {};
+    }
   }
 
   std::function<void()> asyncAddPath(std::string_view path) override
@@ -51,7 +63,11 @@ class LibraryHandler final
     score::PathInfo file{path};
 
     // Of the .xml files, only Hydrogen drumkits belong to this sampler
-    if(file.fileName.ends_with(".xml") && file.fileName != "drumkit.xml")
+    // (case-insensitive: kits from case-preserving archives vary)
+    const auto fileName
+        = QString::fromUtf8(file.fileName.data(), file.fileName.size());
+    if(fileName.endsWith(QStringLiteral(".xml"), Qt::CaseInsensitive)
+       && fileName.compare(QStringLiteral("drumkit.xml"), Qt::CaseInsensitive) != 0)
       return {};
 
     Library::ProcessData pdata;
@@ -136,7 +152,8 @@ class LibraryHandler final
 
     // Hydrogen kits are one-per-folder with a fixed file name: their parent
     // folder is the kit itself, so group by the folder above it instead
-    if(file.fileName == "drumkit.xml")
+    const auto fn = QString::fromUtf8(file.fileName.data(), file.fileName.size());
+    if(fn.compare(QStringLiteral("drumkit.xml"), Qt::CaseInsensitive) == 0)
     {
       score::PathInfo parent{file.absolutePath};
       parentFolder = QString::fromUtf8(
@@ -175,15 +192,18 @@ class DropHandler final : public Process::ProcessDropHandler
     if(ext != "gig" && ext != "dls" && ext != "sf2")
     {
       // Of the .xml files, only Hydrogen drumkits are ours
-      if(ext != "xml" || info.fileName() != QStringLiteral("drumkit.xml"))
+      if(ext != "xml"
+         || info.fileName().compare(QStringLiteral("drumkit.xml"), Qt::CaseInsensitive)
+                != 0)
         return;
     }
 
     Process::ProcessDropHandler::ProcessDrop p;
     p.creation.key = Metadata<ConcreteKey_k, ProcessModel>::get();
     p.creation.prettyName
-        = info.fileName() == QStringLiteral("drumkit.xml") ? info.dir().dirName()
-                                                           : info.baseName();
+        = info.fileName().compare(QStringLiteral("drumkit.xml"), Qt::CaseInsensitive) == 0
+              ? info.dir().dirName()
+              : info.baseName();
     p.creation.customData = filename.absolute;
 
     vec.push_back(std::move(p));
