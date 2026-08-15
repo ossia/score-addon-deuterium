@@ -331,18 +331,24 @@ private:
 
     // 2. mono / legato handling for melodic content
     const bool monoish = p.voiceMode != SamplerParams::Poly;
+    bool legatoTransfer = false;
     if(monoish)
     {
-      bool retargeted = false;
-      if(p.voiceMode == SamplerParams::Legato)
+      bool anyHeld = false;
+      for(auto& v : m_voices)
+        if(v.playing && !v.released && !v.choked && v.region && v.region->pitchTrack)
+          anyHeld = true;
+
+      if(p.voiceMode == SamplerParams::Legato && anyHeld)
       {
+        // Same zone still held: just glide there, no retrigger at all
+        bool retargeted = false;
         for(auto& v : m_voices)
         {
           if(v.playing && !v.released && !v.choked && v.region
              && v.region->pitchTrack && note >= v.region->keyLow
              && note <= v.region->keyHigh)
           {
-            // Same zone still held: just glide there, no retrigger
             const double target = basePitchSemitones(*v.region, p, note);
             v.glide.start(v.glide.current, target, true);
             v.note = note;
@@ -351,15 +357,20 @@ private:
             retargeted = true;
           }
         }
+        if(retargeted)
+          return;
       }
-      else
-      {
-        for(auto& v : m_voices)
-          if(v.playing && !v.choked && v.region && v.region->pitchTrack)
-            v.choked = true;
-      }
-      if(retargeted)
-        return;
+
+      // Crossing into another zone (or mono retrigger): the previous melodic
+      // voices are choked...
+      for(auto& v : m_voices)
+        if(v.playing && !v.choked && v.region && v.region->pitchTrack)
+          v.choked = true;
+
+      // ...and in legato, while a note was still held, the replacement voice
+      // continues the phrase: its attack is suppressed so the zone change
+      // crossfades instead of re-articulating
+      legatoTransfer = p.voiceMode == SamplerParams::Legato && anyHeld;
     }
 
     // 3. zone matching with round-robin/random alternation.
@@ -414,13 +425,13 @@ private:
       if(policy == 0)
       {
         for(int g = 0; g < groupSize; g++)
-          start_voice(instr.regions[group[g]], note, velocity, false);
+          start_voice(instr.regions[group[g]], note, velocity, false, legatoTransfer);
       }
       else
       {
         const int pick
             = pickAlternative(groupSize, policy, m_rrCounter[note & 127], m_rngState);
-        start_voice(instr.regions[group[pick]], note, velocity, false);
+        start_voice(instr.regions[group[pick]], note, velocity, false, legatoTransfer);
       }
     }
   }
@@ -449,7 +460,7 @@ private:
         continue;
       if(!regionMatches(region, note, velocity))
         continue;
-      start_voice(region, note, velocity, true);
+      start_voice(region, note, velocity, true, false);
     }
   }
 
@@ -482,7 +493,8 @@ private:
   }
 
   void start_voice(
-      const GigRegion& region, int note, int velocity, bool fromRelease) noexcept
+      const GigRegion& region, int note, int velocity, bool fromRelease,
+      bool legatoTransfer = false) noexcept
   {
     auto& sampleData = region.sample.data;
     if(sampleData.empty() || sampleData[0].empty())
@@ -545,7 +557,11 @@ private:
     const auto env = resolveEnvelope(region, p);
     voice.amp_adsr.reset();
     voice.amp_adsr.set_sample_rate(m_sampleRate);
-    voice.amp_adsr.attack(std::max(0.001, env.attack));
+    // A legato zone transfer continues a held phrase: crossfade in instead
+    // of re-articulating the attack
+    const double attack
+        = legatoTransfer && region.pitchTrack ? 0.003 : std::max(0.001, env.attack);
+    voice.amp_adsr.attack(attack);
     voice.amp_adsr.decay(std::max(0.001, env.decay));
     voice.amp_adsr.sustain(env.sustain);
     voice.amp_adsr.release(std::max(0.005, env.release));
