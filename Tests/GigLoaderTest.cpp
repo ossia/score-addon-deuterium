@@ -8,7 +8,7 @@
 
 #include <QFile>
 #include <QTemporaryDir>
-#include <QtTest>
+#include "TestHelpers.hpp"
 
 #include <cstdint>
 #include <vector>
@@ -436,512 +436,506 @@ QString makeSf2File(const QString& path)
 
 }
 
-class GigLoaderTest final : public QObject
+// One temporary directory for the whole run, like the QtTest fixture had.
+static QString tmp(const QString& name)
 {
-  Q_OBJECT
-  QTemporaryDir m_dir;
+static QTemporaryDir dir;
+return dir.filePath(name);
+}
 
-  QString tmp(const QString& name) { return m_dir.filePath(name); }
+TEST_CASE("loader: missing_files_return_null", "[deuterium]")
+{
+  REQUIRE(!loadGigFileMetadata("/nonexistent/dir/foo.gig"));
+  REQUIRE(!loadGigFileMetadata("/nonexistent/dir/foo.dls"));
+  REQUIRE(!loadGigFileMetadata("/nonexistent/dir/foo.sf2"));
+  REQUIRE(!loadGigFileSamples(nullptr, RATE, {}));
+}
 
-private Q_SLOTS:
+TEST_CASE("loader: garbage_file_returns_null", "[deuterium]")
+{
+  const auto path = tmp("garbage.sf2");
+  QFile f(path);
+  f.open(QIODevice::WriteOnly);
+  f.write(QByteArray(512, 'x'));
+  f.close();
+  REQUIRE(!loadGigFileMetadata(path));
 
-  void test_missing_files_return_null()
+  // A valid file with the wrong extension is recognized by content
+  // sniffing (sample banks in the wild frequently carry wrong extensions)
+  const auto gigAsSf2 = makeGigFile(tmp("actually_a.gig"));
+  QFile::copy(gigAsSf2, tmp("wrongform.sf2"));
+  auto sniffed = loadGigFileMetadata(tmp("wrongform.sf2"));
+  REQUIRE(sniffed);
+  REQUIRE(approxEq(sniffed->instruments.size(), std::size_t(1)));
+}
+
+TEST_CASE("loader: gig_metadata", "[deuterium]")
+{
+  const auto path = makeGigFile(tmp("basic.gig"));
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  REQUIRE(approxEq(info->name, std::string("TestBank")));
+  REQUIRE(approxEq(info->instruments.size(), std::size_t(1)));
+  REQUIRE(approxEq(info->instruments[0].name, std::string("TestInstrument")));
+
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  REQUIRE(approxEq(int(regions[0].keyLow), 36));
+  REQUIRE(approxEq(int(regions[0].keyHigh), 48));
+  REQUIRE(approxEq(int(regions[0].velLow), 0));
+  REQUIRE(approxEq(int(regions[0].velHigh), 127));
+  REQUIRE(approxEq(regions[0].sample.midiUnityNote, uint32_t(60)));
+  REQUIRE(!regions[0].sample.data); // metadata only
+}
+
+TEST_CASE("loader: gig_samples", "[deuterium]")
+{
+  const auto path = makeGigFile(tmp("samples.gig"));
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+
+  auto& regions = loaded->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  auto& sample = regions[0].sample;
+  REQUIRE(approxEq(sample.data->size(), std::size_t(1)));
+  REQUIRE(approxEq((*sample.data)[0].size(), std::size_t(FRAMES)));
+
+  // Values must match the known ramp within 16 bit quantization
+  auto ramp = rampData();
+  for(int i : {0, 1, 100, FRAMES - 1})
+    REQUIRE(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
+}
+
+TEST_CASE("loader: gig_velocity_zones_non_uniform", "[deuterium]")
+{
+  const auto path = makeGigFile(tmp("velsplit.gig"), {40, 127});
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(2)));
+
+  // Zones must be contiguous and non-overlapping: 0-40, 41-127
+  REQUIRE(approxEq(int(regions[0].velLow), 0));
+  REQUIRE(approxEq(int(regions[0].velHigh), 40));
+  REQUIRE(approxEq(int(regions[1].velLow), 41));
+  REQUIRE(approxEq(int(regions[1].velHigh), 127));
+}
+
+TEST_CASE("loader: gig_loop_points_clamped_to_sample_length", "[deuterium]")
+{
+  // Loop end far beyond the actual sample data
+  const auto path = makeGigFile(tmp("loop.gig"), {}, 100, 100000);
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+
+  auto& sample = loaded->instruments[0].regions[0].sample;
+  const auto frames = (*sample.data)[0].size();
+  if(sample.hasLoop)
   {
-    QVERIFY(!loadGigFileMetadata("/nonexistent/dir/foo.gig"));
-    QVERIFY(!loadGigFileMetadata("/nonexistent/dir/foo.dls"));
-    QVERIFY(!loadGigFileMetadata("/nonexistent/dir/foo.sf2"));
-    QVERIFY(!loadGigFileSamples(nullptr, RATE, {}));
+    REQUIRE(sample.loopEnd <= frames);
+    REQUIRE(sample.loopStart < sample.loopEnd);
   }
+}
 
-  void test_garbage_file_returns_null()
+TEST_CASE("loader: gig_resampling_keeps_loop_valid", "[deuterium]")
+{
+  const auto path = makeGigFile(tmp("resample.gig"), {}, 100, 100000);
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto loaded = loadGigFileSamples(info, 96000, {});
+  REQUIRE(loaded);
+
+  auto& sample = loaded->instruments[0].regions[0].sample;
+  REQUIRE(approxEq(sample.sampleRate, uint32_t(96000)));
+  const auto frames = (*sample.data)[0].size();
+  REQUIRE(frames > std::size_t(FRAMES)); // upsampled
+  if(sample.hasLoop)
+    REQUIRE(sample.loopEnd <= frames);
+}
+
+TEST_CASE("loader: truncated_gig_does_not_crash", "[deuterium]")
+{
+  const auto path = makeGigFile(tmp("trunc.gig"));
+
+  QFile f(path);
+  REQUIRE(f.open(QIODevice::ReadOnly));
+  auto bytes = f.readAll();
+  f.close();
+
+  // Chop the file in the middle of the sample data
+  const auto truncated = tmp("truncated.gig");
+  QFile out(truncated);
+  REQUIRE(out.open(QIODevice::WriteOnly));
+  out.write(bytes.constData(), bytes.size() * 6 / 10);
+  out.close();
+
+  // Whatever the outcome (null or pruned regions), it must not crash and
+  // any surviving region's loop points must stay inside the decoded data.
+  auto info = loadGigFileMetadata(truncated);
+  if(info)
   {
-    const auto path = tmp("garbage.sf2");
-    QFile f(path);
-    f.open(QIODevice::WriteOnly);
-    f.write(QByteArray(512, 'x'));
-    f.close();
-    QVERIFY(!loadGigFileMetadata(path));
-
-    // A valid file with the wrong extension is recognized by content
-    // sniffing (sample banks in the wild frequently carry wrong extensions)
-    const auto gigAsSf2 = makeGigFile(tmp("actually_a.gig"));
-    QFile::copy(gigAsSf2, tmp("wrongform.sf2"));
-    auto sniffed = loadGigFileMetadata(tmp("wrongform.sf2"));
-    QVERIFY(sniffed);
-    QCOMPARE(sniffed->instruments.size(), std::size_t(1));
-  }
-
-  void test_gig_metadata()
-  {
-    const auto path = makeGigFile(tmp("basic.gig"));
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    QCOMPARE(info->name, std::string("TestBank"));
-    QCOMPARE(info->instruments.size(), std::size_t(1));
-    QCOMPARE(info->instruments[0].name, std::string("TestInstrument"));
-
-    auto& regions = info->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(1));
-    QCOMPARE(int(regions[0].keyLow), 36);
-    QCOMPARE(int(regions[0].keyHigh), 48);
-    QCOMPARE(int(regions[0].velLow), 0);
-    QCOMPARE(int(regions[0].velHigh), 127);
-    QCOMPARE(regions[0].sample.midiUnityNote, uint32_t(60));
-    QVERIFY(!regions[0].sample.data); // metadata only
-  }
-
-  void test_gig_samples()
-  {
-    const auto path = makeGigFile(tmp("samples.gig"));
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
     auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-
-    auto& regions = loaded->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(1));
-    auto& sample = regions[0].sample;
-    QCOMPARE(sample.data->size(), std::size_t(1));
-    QCOMPARE((*sample.data)[0].size(), std::size_t(FRAMES));
-
-    // Values must match the known ramp within 16 bit quantization
-    auto ramp = rampData();
-    for(int i : {0, 1, 100, FRAMES - 1})
-      QVERIFY(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
-  }
-
-  void test_gig_velocity_zones_non_uniform()
-  {
-    const auto path = makeGigFile(tmp("velsplit.gig"), {40, 127});
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-
-    auto& regions = info->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(2));
-
-    // Zones must be contiguous and non-overlapping: 0-40, 41-127
-    QCOMPARE(int(regions[0].velLow), 0);
-    QCOMPARE(int(regions[0].velHigh), 40);
-    QCOMPARE(int(regions[1].velLow), 41);
-    QCOMPARE(int(regions[1].velHigh), 127);
-  }
-
-  void test_gig_loop_points_clamped_to_sample_length()
-  {
-    // Loop end far beyond the actual sample data
-    const auto path = makeGigFile(tmp("loop.gig"), {}, 100, 100000);
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-
-    auto& sample = loaded->instruments[0].regions[0].sample;
-    const auto frames = (*sample.data)[0].size();
-    if(sample.hasLoop)
+    if(loaded)
     {
-      QVERIFY(sample.loopEnd <= frames);
-      QVERIFY(sample.loopStart < sample.loopEnd);
-    }
-  }
-
-  void test_gig_resampling_keeps_loop_valid()
-  {
-    const auto path = makeGigFile(tmp("resample.gig"), {}, 100, 100000);
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    auto loaded = loadGigFileSamples(info, 96000, {});
-    QVERIFY(loaded);
-
-    auto& sample = loaded->instruments[0].regions[0].sample;
-    QCOMPARE(sample.sampleRate, uint32_t(96000));
-    const auto frames = (*sample.data)[0].size();
-    QVERIFY(frames > std::size_t(FRAMES)); // upsampled
-    if(sample.hasLoop)
-      QVERIFY(sample.loopEnd <= frames);
-  }
-
-  void test_truncated_gig_does_not_crash()
-  {
-    const auto path = makeGigFile(tmp("trunc.gig"));
-
-    QFile f(path);
-    QVERIFY(f.open(QIODevice::ReadOnly));
-    auto bytes = f.readAll();
-    f.close();
-
-    // Chop the file in the middle of the sample data
-    const auto truncated = tmp("truncated.gig");
-    QFile out(truncated);
-    QVERIFY(out.open(QIODevice::WriteOnly));
-    out.write(bytes.constData(), bytes.size() * 6 / 10);
-    out.close();
-
-    // Whatever the outcome (null or pruned regions), it must not crash and
-    // any surviving region's loop points must stay inside the decoded data.
-    auto info = loadGigFileMetadata(truncated);
-    if(info)
-    {
-      auto loaded = loadGigFileSamples(info, RATE, {});
-      if(loaded)
+      for(auto& r : loaded->instruments[loaded->selectedInstrument].regions)
       {
-        for(auto& r : loaded->instruments[loaded->selectedInstrument].regions)
-        {
-          QVERIFY(r.sample.data && !r.sample.data->empty());
-          if(r.sample.hasLoop)
-            QVERIFY(r.sample.loopEnd <= (*r.sample.data)[0].size());
-        }
+        REQUIRE((r.sample.data && !r.sample.data->empty()));
+        if(r.sample.hasLoop)
+          REQUIRE(r.sample.loopEnd <= (*r.sample.data)[0].size());
       }
     }
   }
+}
 
-  void test_parse_instrument_path()
+TEST_CASE("loader: parse_instrument_path", "[deuterium]")
+{
+  auto plain = parseInstrumentPath("/some/file.gig");
+  REQUIRE(approxEq(plain.file, QStringLiteral("/some/file.gig")));
+  REQUIRE(approxEq(plain.instrument, 0));
+
+  auto indexed = parseInstrumentPath("/some/file.sf2|3");
+  REQUIRE(approxEq(indexed.file, QStringLiteral("/some/file.sf2")));
+  REQUIRE(approxEq(indexed.instrument, 3));
+
+  // Non-numeric suffix after '|' stays part of the path
+  auto weird = parseInstrumentPath("/some/we|ird.gig");
+  REQUIRE(approxEq(weird.file, QStringLiteral("/some/we|ird.gig")));
+  REQUIRE(approxEq(weird.instrument, 0));
+
+  // An existing file whose name contains "|<number>" is not split
+  const auto trap = tmp("trap|2");
+  QFile f(trap);
+  REQUIRE(f.open(QIODevice::WriteOnly));
+  f.write("x");
+  f.close();
+  auto existing = parseInstrumentPath(trap);
+  REQUIRE(approxEq(existing.file, trap));
+  REQUIRE(approxEq(existing.instrument, 0));
+}
+
+TEST_CASE("loader: multi_instrument_gig", "[deuterium]")
+{
+  const auto path
+      = makeGigFile(tmp("multi.gig"), {}, 0, 0, /* instruments: */ 3);
+
+  const auto names = listInstruments(path);
+  REQUIRE(approxEq(names.size(), std::size_t(3)));
+  REQUIRE(approxEq(names[0], std::string("TestInstrument")));
+  REQUIRE(approxEq(names[1], std::string("TestInstrument2")));
+  REQUIRE(approxEq(names[2], std::string("TestInstrument3")));
+
+  // Loading with an explicit instrument index selects that instrument
+  auto info = loadGigFileMetadata(path, 1);
+  REQUIRE(info);
+  REQUIRE(approxEq(info->selectedInstrument, 1));
+  auto& regions = info->instruments[1].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  REQUIRE(approxEq(int(regions[0].keyLow), 37));
+  REQUIRE(approxEq(int(regions[0].keyHigh), 49));
+
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  REQUIRE(approxEq(loaded->instruments[1].regions.size(), std::size_t(1)));
+  REQUIRE(loaded->instruments[1].regions[0].sample.data);
+
+  // Out-of-range index falls back to instrument 0
+  auto fallback = loadGigFileMetadata(path, 42);
+  REQUIRE(fallback);
+  REQUIRE(approxEq(fallback->selectedInstrument, 0));
+
+  REQUIRE(approxEq(listInstruments("/nonexistent/file.gig").size(), std::size_t(0)));
+}
+
+TEST_CASE("loader: dls", "[deuterium]")
+{
+  const auto path = makeDlsFile(tmp("basic.dls"));
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  REQUIRE(approxEq(info->name, std::string("TestDlsBank")));
+  REQUIRE(approxEq(info->instruments.size(), std::size_t(1)));
+  REQUIRE(approxEq(info->instruments[0].name, std::string("TestDlsInstrument")));
+
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  REQUIRE(approxEq(int(regions[0].keyLow), 40));
+  REQUIRE(approxEq(int(regions[0].keyHigh), 52));
+  REQUIRE(approxEq(int(regions[0].velLow), 20));
+  REQUIRE(approxEq(int(regions[0].velHigh), 100));
+  REQUIRE(approxEq(regions[0].sample.midiUnityNote, uint32_t(62)));
+  REQUIRE(regions[0].sample.hasLoop);
+  REQUIRE(approxEq(regions[0].sample.loopStart, uint32_t(10)));
+  REQUIRE(approxEq(regions[0].sample.loopEnd, uint32_t(60)));
+
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  auto& sample = loaded->instruments[0].regions[0].sample;
+  REQUIRE(approxEq(sample.data->size(), std::size_t(1)));
+  REQUIRE(approxEq((*sample.data)[0].size(), std::size_t(FRAMES)));
+
+  auto ramp = rampData();
+  for(int i : {0, 50, FRAMES - 1})
+    REQUIRE(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
+}
+
+// A header claiming a zero (or absurd) sample rate must neither divide by
+// zero nor allocate a giant resample buffer
+TEST_CASE("loader: zero_sample_rate_is_survivable", "[deuterium]")
+{
+  const auto path = makeGigFile(tmp("zerorate.gig"), {}, 0, 0, 1, 0);
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  auto& regions = loaded->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  REQUIRE(approxEq((*regions[0].sample.data)[0].size(), std::size_t(FRAMES)));
+  REQUIRE(approxEq(regions[0].sample.sampleRate, uint32_t(RATE)));
+  for(auto s : (*regions[0].sample.data)[0])
+    REQUIRE(std::isfinite(s));
+}
+
+// A gig round-robin dimension produces alternation indices instead of
+// stacked duplicate regions
+TEST_CASE("loader: gig_round_robin_dimension", "[deuterium]")
+{
+  const auto path = tmp("rr.gig");
   {
-    auto plain = parseInstrumentPath("/some/file.gig");
-    QCOMPARE(plain.file, QStringLiteral("/some/file.gig"));
-    QCOMPARE(plain.instrument, 0);
+    gig::File f;
+    auto data = rampData();
+    gig::Sample* smp = f.AddSample();
+    smp->Channels = 1;
+    smp->BitDepth = 16;
+    smp->FrameSize = 2;
+    smp->SamplesPerSecond = RATE;
+    smp->MIDIUnityNote = 60;
+    smp->Resize(FRAMES);
 
-    auto indexed = parseInstrumentPath("/some/file.sf2|3");
-    QCOMPARE(indexed.file, QStringLiteral("/some/file.sf2"));
-    QCOMPARE(indexed.instrument, 3);
+    gig::Instrument* ins = f.AddInstrument();
+    ins->pInfo->Name = "RRInstr";
+    gig::Region* rgn = ins->AddRegion();
+    rgn->SetKeyRange(40, 50);
+    rgn->SetSample(smp);
+    rgn->pDimensionRegions[0]->pSample = smp;
 
-    // Non-numeric suffix after '|' stays part of the path
-    auto weird = parseInstrumentPath("/some/we|ird.gig");
-    QCOMPARE(weird.file, QStringLiteral("/some/we|ird.gig"));
-    QCOMPARE(weird.instrument, 0);
+    gig::dimension_def_t def{};
+    def.dimension = gig::dimension_roundrobin;
+    def.bits = 1;
+    def.zones = 2;
+    rgn->AddDimension(&def);
+    for(uint32_t z = 0; z < rgn->DimensionRegions; z++)
+      rgn->pDimensionRegions[z]->pSample = smp;
 
-    // An existing file whose name contains "|<number>" is not split
-    const auto trap = tmp("trap|2");
-    QFile f(trap);
-    QVERIFY(f.open(QIODevice::WriteOnly));
-    f.write("x");
-    f.close();
-    auto existing = parseInstrumentPath(trap);
-    QCOMPARE(existing.file, trap);
-    QCOMPARE(existing.instrument, 0);
+    f.Save(path.toStdString());
+    smp->SetPos(0);
+    smp->Write(data.data(), FRAMES);
   }
 
-  void test_multi_instrument_gig()
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(2)));
+  REQUIRE(approxEq(regions[0].rrIndex, 0));
+  REQUIRE(approxEq(regions[1].rrIndex, 1));
+  REQUIRE(approxEq(regions[0].selectionAlgo, 1));
+  // Same zone: identical key/velocity ranges
+  REQUIRE(approxEq(regions[0].keyLow, regions[1].keyLow));
+  REQUIRE(approxEq(regions[0].velLow, regions[1].velLow));
+  REQUIRE(approxEq(regions[0].velHigh, regions[1].velHigh));
+
+  // After phase 2: alternation groups precomputed, and both zones share
+  // one deduplicated decoded sample
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  auto& lr = loaded->instruments[0].regions;
+  REQUIRE(approxEq(lr.size(), std::size_t(2)));
+  REQUIRE(approxEq(int(lr[0].altCount), 2));
+  REQUIRE(approxEq(lr[0].altGroup, lr[1].altGroup));
+  REQUIRE(lr[0].altGroup >= 0);
+  REQUIRE(lr[0].altIndex != lr[1].altIndex);
+  REQUIRE(lr[0].sample.data);
+  REQUIRE(approxEq(lr[0].sample.data.get(), lr[1].sample.data.get()));
+}
+
+// libgig LoopEnd is an inclusive last-sample index; the engine's loop.end
+// is exclusive, so the loader converts
+TEST_CASE("loader: gig_loop_end_is_converted_to_exclusive", "[deuterium]")
+{
+  const auto path = makeGigFile(tmp("loopend.gig"), {}, 100, 200);
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto& sample = info->instruments[0].regions[0].sample;
+  REQUIRE(sample.hasLoop);
+  REQUIRE(approxEq(sample.loopStart, uint32_t(100)));
+  REQUIRE(approxEq(sample.loopEnd, uint32_t(201)));
+}
+
+TEST_CASE("loader: hydrogen_drumkit", "[deuterium]")
+{
+  const auto path = makeHydrogenKit(tmp("mykit"));
+  REQUIRE(approxEq(formatName(path), QStringLiteral("Drumkit")));
+
+  const auto names = listInstruments(path);
+  REQUIRE(approxEq(names.size(), std::size_t(1)));
+  REQUIRE(approxEq(names[0], std::string("TestKit")));
+
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  REQUIRE(approxEq(info->name, std::string("TestKit")));
+  REQUIRE(approxEq(info->instruments.size(), std::size_t(1)));
+
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(3)));
+
+  // Kick, layer 1: velocity range is half-open, so 0-0.5 -> 0..63 and the
+  // boundary velocity belongs to the upper layer only
+  REQUIRE(approxEq(int(regions[0].keyLow), 36));
+  REQUIRE(approxEq(int(regions[0].keyHigh), 36));
+  REQUIRE(regions[0].oneShot);
+  REQUIRE(!regions[0].pitchTrack);
+  REQUIRE(!regions[0].muted);
+  REQUIRE(regions[0].applyVelocity);
+  REQUIRE(approxEq(int(regions[0].velLow), 0));
+  REQUIRE(approxEq(int(regions[0].velHigh), 63));
+  REQUIRE(regions[0].velHigh < regions[1].velLow); // no double-trigger
+  REQUIRE(regions[0].vcfEnabled);
+  REQUIRE(approxEq(regions[0].randomPitch, 0.1));
+  REQUIRE(approxEq(regions[0].chokeGroup, 1));
+  REQUIRE(approxEq(regions[2].chokeGroup, -1));
+  REQUIRE(approxEq(regions[0].selectionAlgo, 1)); // ROUND_ROBIN
+  REQUIRE(approxEq(regions[2].selectionAlgo, 0));
+  // ADSR: Hydrogen frames at 44.1kHz -> seconds
+  REQUIRE(approxEq(regions[0].eg1Decay, 1.0));
+  REQUIRE(std::abs(regions[0].eg1Release - 1000.0 / 44100.0) < 1e-9);
+  REQUIRE(std::abs(regions[0].sampleAttenuation - 0.8) < 1e-9);
+
+  // Kick, layer 2: gain and pitch offset applied
+  REQUIRE(approxEq(int(regions[1].velLow), 64));
+  REQUIRE(approxEq(int(regions[1].velHigh), 127));
+  REQUIRE(std::abs(regions[1].sampleAttenuation - 0.4) < 1e-9);
+  REQUIRE(approxEq(regions[1].pitchOffset, -1.0));
+
+  // Snare: oldest format, muted, panned left
+  REQUIRE(approxEq(int(regions[2].keyLow), 38));
+  REQUIRE(regions[2].muted);
+  REQUIRE(regions[2].pan < 0);
+  REQUIRE(approxEq(int(regions[2].velLow), 0));
+  REQUIRE(approxEq(int(regions[2].velHigh), 127));
+
+  // Phase 2: decode the wav layers
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  auto& lregions = loaded->instruments[0].regions;
+  REQUIRE(approxEq(lregions.size(), std::size_t(3)));
+  for(auto& r : lregions)
   {
-    const auto path
-        = makeGigFile(tmp("multi.gig"), {}, 0, 0, /* instruments: */ 3);
-
-    const auto names = listInstruments(path);
-    QCOMPARE(names.size(), std::size_t(3));
-    QCOMPARE(names[0], std::string("TestInstrument"));
-    QCOMPARE(names[1], std::string("TestInstrument2"));
-    QCOMPARE(names[2], std::string("TestInstrument3"));
-
-    // Loading with an explicit instrument index selects that instrument
-    auto info = loadGigFileMetadata(path, 1);
-    QVERIFY(info);
-    QCOMPARE(info->selectedInstrument, 1);
-    auto& regions = info->instruments[1].regions;
-    QCOMPARE(regions.size(), std::size_t(1));
-    QCOMPARE(int(regions[0].keyLow), 37);
-    QCOMPARE(int(regions[0].keyHigh), 49);
-
-    auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-    QCOMPARE(loaded->instruments[1].regions.size(), std::size_t(1));
-    QVERIFY(loaded->instruments[1].regions[0].sample.data);
-
-    // Out-of-range index falls back to instrument 0
-    auto fallback = loadGigFileMetadata(path, 42);
-    QVERIFY(fallback);
-    QCOMPARE(fallback->selectedInstrument, 0);
-
-    QCOMPARE(listInstruments("/nonexistent/file.gig").size(), std::size_t(0));
+    REQUIRE((r.sample.data && !r.sample.data->empty()));
+    REQUIRE(approxEq((*r.sample.data)[0].size(), std::size_t(FRAMES)));
   }
+}
 
-  void test_dls()
-  {
-    const auto path = makeDlsFile(tmp("basic.dls"));
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    QCOMPARE(info->name, std::string("TestDlsBank"));
-    QCOMPARE(info->instruments.size(), std::size_t(1));
-    QCOMPARE(info->instruments[0].name, std::string("TestDlsInstrument"));
+// Hand-edited kits in the wild contain nan/inf/out-of-range values; none
+// of that may ever reach the audio thread.
+TEST_CASE("loader: hostile_drumkit_is_sanitized", "[deuterium]")
+{
+  const auto dirPath = tmp("evilkit");
+  QDir{}.mkpath(dirPath);
+  writeWavFile(dirPath + "/hit.wav");
 
-    auto& regions = info->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(1));
-    QCOMPARE(int(regions[0].keyLow), 40);
-    QCOMPARE(int(regions[0].keyHigh), 52);
-    QCOMPARE(int(regions[0].velLow), 20);
-    QCOMPARE(int(regions[0].velHigh), 100);
-    QCOMPARE(regions[0].sample.midiUnityNote, uint32_t(62));
-    QVERIFY(regions[0].sample.hasLoop);
-    QCOMPARE(regions[0].sample.loopStart, uint32_t(10));
-    QCOMPARE(regions[0].sample.loopEnd, uint32_t(60));
-
-    auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-    auto& sample = loaded->instruments[0].regions[0].sample;
-    QCOMPARE(sample.data->size(), std::size_t(1));
-    QCOMPARE((*sample.data)[0].size(), std::size_t(FRAMES));
-
-    auto ramp = rampData();
-    for(int i : {0, 50, FRAMES - 1})
-      QVERIFY(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
-  }
-
-  // A header claiming a zero (or absurd) sample rate must neither divide by
-  // zero nor allocate a giant resample buffer
-  void test_zero_sample_rate_is_survivable()
-  {
-    const auto path = makeGigFile(tmp("zerorate.gig"), {}, 0, 0, 1, 0);
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-    auto& regions = loaded->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(1));
-    QCOMPARE((*regions[0].sample.data)[0].size(), std::size_t(FRAMES));
-    QCOMPARE(regions[0].sample.sampleRate, uint32_t(RATE));
-    for(auto s : (*regions[0].sample.data)[0])
-      QVERIFY(std::isfinite(s));
-  }
-
-  // A gig round-robin dimension produces alternation indices instead of
-  // stacked duplicate regions
-  void test_gig_round_robin_dimension()
-  {
-    const auto path = tmp("rr.gig");
-    {
-      gig::File f;
-      auto data = rampData();
-      gig::Sample* smp = f.AddSample();
-      smp->Channels = 1;
-      smp->BitDepth = 16;
-      smp->FrameSize = 2;
-      smp->SamplesPerSecond = RATE;
-      smp->MIDIUnityNote = 60;
-      smp->Resize(FRAMES);
-
-      gig::Instrument* ins = f.AddInstrument();
-      ins->pInfo->Name = "RRInstr";
-      gig::Region* rgn = ins->AddRegion();
-      rgn->SetKeyRange(40, 50);
-      rgn->SetSample(smp);
-      rgn->pDimensionRegions[0]->pSample = smp;
-
-      gig::dimension_def_t def{};
-      def.dimension = gig::dimension_roundrobin;
-      def.bits = 1;
-      def.zones = 2;
-      rgn->AddDimension(&def);
-      for(uint32_t z = 0; z < rgn->DimensionRegions; z++)
-        rgn->pDimensionRegions[z]->pSample = smp;
-
-      f.Save(path.toStdString());
-      smp->SetPos(0);
-      smp->Write(data.data(), FRAMES);
-    }
-
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    auto& regions = info->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(2));
-    QCOMPARE(regions[0].rrIndex, 0);
-    QCOMPARE(regions[1].rrIndex, 1);
-    QCOMPARE(regions[0].selectionAlgo, 1);
-    // Same zone: identical key/velocity ranges
-    QCOMPARE(regions[0].keyLow, regions[1].keyLow);
-    QCOMPARE(regions[0].velLow, regions[1].velLow);
-    QCOMPARE(regions[0].velHigh, regions[1].velHigh);
-
-    // After phase 2: alternation groups precomputed, and both zones share
-    // one deduplicated decoded sample
-    auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-    auto& lr = loaded->instruments[0].regions;
-    QCOMPARE(lr.size(), std::size_t(2));
-    QCOMPARE(int(lr[0].altCount), 2);
-    QCOMPARE(lr[0].altGroup, lr[1].altGroup);
-    QVERIFY(lr[0].altGroup >= 0);
-    QVERIFY(lr[0].altIndex != lr[1].altIndex);
-    QVERIFY(lr[0].sample.data);
-    QCOMPARE(lr[0].sample.data.get(), lr[1].sample.data.get());
-  }
-
-  // libgig LoopEnd is an inclusive last-sample index; the engine's loop.end
-  // is exclusive, so the loader converts
-  void test_gig_loop_end_is_converted_to_exclusive()
-  {
-    const auto path = makeGigFile(tmp("loopend.gig"), {}, 100, 200);
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    auto& sample = info->instruments[0].regions[0].sample;
-    QVERIFY(sample.hasLoop);
-    QCOMPARE(sample.loopStart, uint32_t(100));
-    QCOMPARE(sample.loopEnd, uint32_t(201));
-  }
-
-  void test_hydrogen_drumkit()
-  {
-    const auto path = makeHydrogenKit(tmp("mykit"));
-    QCOMPARE(formatName(path), QStringLiteral("Drumkit"));
-
-    const auto names = listInstruments(path);
-    QCOMPARE(names.size(), std::size_t(1));
-    QCOMPARE(names[0], std::string("TestKit"));
-
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    QCOMPARE(info->name, std::string("TestKit"));
-    QCOMPARE(info->instruments.size(), std::size_t(1));
-
-    auto& regions = info->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(3));
-
-    // Kick, layer 1: velocity range is half-open, so 0-0.5 -> 0..63 and the
-    // boundary velocity belongs to the upper layer only
-    QCOMPARE(int(regions[0].keyLow), 36);
-    QCOMPARE(int(regions[0].keyHigh), 36);
-    QVERIFY(regions[0].oneShot);
-    QVERIFY(!regions[0].pitchTrack);
-    QVERIFY(!regions[0].muted);
-    QVERIFY(regions[0].applyVelocity);
-    QCOMPARE(int(regions[0].velLow), 0);
-    QCOMPARE(int(regions[0].velHigh), 63);
-    QVERIFY(regions[0].velHigh < regions[1].velLow); // no double-trigger
-    QVERIFY(regions[0].vcfEnabled);
-    QCOMPARE(regions[0].randomPitch, 0.1);
-    QCOMPARE(regions[0].chokeGroup, 1);
-    QCOMPARE(regions[2].chokeGroup, -1);
-    QCOMPARE(regions[0].selectionAlgo, 1); // ROUND_ROBIN
-    QCOMPARE(regions[2].selectionAlgo, 0);
-    // ADSR: Hydrogen frames at 44.1kHz -> seconds
-    QCOMPARE(regions[0].eg1Decay, 1.0);
-    QVERIFY(std::abs(regions[0].eg1Release - 1000.0 / 44100.0) < 1e-9);
-    QVERIFY(std::abs(regions[0].sampleAttenuation - 0.8) < 1e-9);
-
-    // Kick, layer 2: gain and pitch offset applied
-    QCOMPARE(int(regions[1].velLow), 64);
-    QCOMPARE(int(regions[1].velHigh), 127);
-    QVERIFY(std::abs(regions[1].sampleAttenuation - 0.4) < 1e-9);
-    QCOMPARE(regions[1].pitchOffset, -1.0);
-
-    // Snare: oldest format, muted, panned left
-    QCOMPARE(int(regions[2].keyLow), 38);
-    QVERIFY(regions[2].muted);
-    QVERIFY(regions[2].pan < 0);
-    QCOMPARE(int(regions[2].velLow), 0);
-    QCOMPARE(int(regions[2].velHigh), 127);
-
-    // Phase 2: decode the wav layers
-    auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-    auto& lregions = loaded->instruments[0].regions;
-    QCOMPARE(lregions.size(), std::size_t(3));
-    for(auto& r : lregions)
-    {
-      QVERIFY(r.sample.data && !r.sample.data->empty());
-      QCOMPARE((*r.sample.data)[0].size(), std::size_t(FRAMES));
-    }
-  }
-
-  // Hand-edited kits in the wild contain nan/inf/out-of-range values; none
-  // of that may ever reach the audio thread.
-  void test_hostile_drumkit_is_sanitized()
-  {
-    const auto dirPath = tmp("evilkit");
-    QDir{}.mkpath(dirPath);
-    writeWavFile(dirPath + "/hit.wav");
-
-    const char* xml = R"_(<?xml version="1.0" encoding="UTF-8"?>
+  const char* xml = R"_(<?xml version="1.0" encoding="UTF-8"?>
 <drumkit_info>
-  <name>EvilKit</name>
-  <instrumentList>
-    <instrument>
-      <id>0</id>
-      <name>Evil</name>
-      <midiOutNote>40</midiOutNote>
-      <volume>nan</volume>
-      <randomPitchFactor>inf</randomPitchFactor>
-      <muteGroup>3</muteGroup>
-      <pan>5</pan>
-      <Attack>-500000</Attack>
-      <Decay>nan</Decay>
-      <Sustain>7</Sustain>
-      <Release>1e20</Release>
-      <instrumentComponent>
-        <layer>
-          <filename>hit.wav</filename>
-          <min>0.9</min>
-          <max>0.1</max>
-          <gain>1e9</gain>
-          <pitch>nan</pitch>
-        </layer>
-      </instrumentComponent>
-    </instrument>
-  </instrumentList>
+<name>EvilKit</name>
+<instrumentList>
+  <instrument>
+    <id>0</id>
+    <name>Evil</name>
+    <midiOutNote>40</midiOutNote>
+    <volume>nan</volume>
+    <randomPitchFactor>inf</randomPitchFactor>
+    <muteGroup>3</muteGroup>
+    <pan>5</pan>
+    <Attack>-500000</Attack>
+    <Decay>nan</Decay>
+    <Sustain>7</Sustain>
+    <Release>1e20</Release>
+    <instrumentComponent>
+      <layer>
+        <filename>hit.wav</filename>
+        <min>0.9</min>
+        <max>0.1</max>
+        <gain>1e9</gain>
+        <pitch>nan</pitch>
+      </layer>
+    </instrumentComponent>
+  </instrument>
+</instrumentList>
 </drumkit_info>
 )_";
-    QFile out(dirPath + "/drumkit.xml");
-    QVERIFY(out.open(QIODevice::WriteOnly));
-    out.write(xml);
-    out.close();
+  QFile out(dirPath + "/drumkit.xml");
+  REQUIRE(out.open(QIODevice::WriteOnly));
+  out.write(xml);
+  out.close();
 
-    auto info = loadGigFileMetadata(dirPath + "/drumkit.xml");
-    QVERIFY(info);
-    auto& regions = info->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(1));
-    auto& r = regions[0];
+  auto info = loadGigFileMetadata(dirPath + "/drumkit.xml");
+  REQUIRE(info);
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  auto& r = regions[0];
 
-    // Everything finite and in range
-    QVERIFY(std::isfinite(r.eg1Attack) && r.eg1Attack >= 0. && r.eg1Attack <= 60.);
-    QVERIFY(std::isfinite(r.eg1Decay) && r.eg1Decay >= 0. && r.eg1Decay <= 60.);
-    QVERIFY(std::isfinite(r.eg1Release) && r.eg1Release >= 0. && r.eg1Release <= 60.);
-    QVERIFY(r.eg1Sustain >= 0. && r.eg1Sustain <= 1.);
-    QVERIFY(std::isfinite(r.sampleAttenuation) && r.sampleAttenuation <= 8.);
-    QVERIFY(std::isfinite(r.pitchOffset));
-    QCOMPARE(r.pitchOffset, 0.); // nan -> default
-    QCOMPARE(r.randomPitch, 0.); // inf -> default
-    QCOMPARE(int(r.pan), 63);    // 5 -> clamped hard right
-    QCOMPARE(r.chokeGroup, 3);
+  // Everything finite and in range
+  REQUIRE((std::isfinite(r.eg1Attack) && r.eg1Attack >= 0. && r.eg1Attack <= 60.));
+  REQUIRE((std::isfinite(r.eg1Decay) && r.eg1Decay >= 0. && r.eg1Decay <= 60.));
+  REQUIRE((std::isfinite(r.eg1Release) && r.eg1Release >= 0. && r.eg1Release <= 60.));
+  REQUIRE((r.eg1Sustain >= 0. && r.eg1Sustain <= 1.));
+  REQUIRE((std::isfinite(r.sampleAttenuation) && r.sampleAttenuation <= 8.));
+  REQUIRE(std::isfinite(r.pitchOffset));
+  REQUIRE(approxEq(r.pitchOffset, 0.)); // nan -> default
+  REQUIRE(approxEq(r.randomPitch, 0.)); // inf -> default
+  REQUIRE(approxEq(int(r.pan), 63));    // 5 -> clamped hard right
+  REQUIRE(approxEq(r.chokeGroup, 3));
 
-    // Swapped velocity bounds are reordered
-    QVERIFY(r.velLow <= r.velHigh);
+  // Swapped velocity bounds are reordered
+  REQUIRE(r.velLow <= r.velHigh);
 
-    auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-    for(auto& lr : loaded->instruments[0].regions)
-      for(auto& ch : *lr.sample.data)
-        for(auto s : ch)
-          QVERIFY(std::isfinite(s));
-  }
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  for(auto& lr : loaded->instruments[0].regions)
+    for(auto& ch : *lr.sample.data)
+      for(auto s : ch)
+        REQUIRE(std::isfinite(s));
+}
 
-  void test_sf2()
-  {
-    const auto path = makeSf2File(tmp("basic.sf2"));
-    auto info = loadGigFileMetadata(path);
-    QVERIFY(info);
-    QCOMPARE(info->instruments.size(), std::size_t(1));
-    QCOMPARE(info->instruments[0].name, std::string("TestPreset"));
+TEST_CASE("loader: sf2", "[deuterium]")
+{
+  const auto path = makeSf2File(tmp("basic.sf2"));
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  REQUIRE(approxEq(info->instruments.size(), std::size_t(1)));
+  REQUIRE(approxEq(info->instruments[0].name, std::string("TestPreset")));
 
-    auto& regions = info->instruments[0].regions;
-    QCOMPARE(regions.size(), std::size_t(1));
-    QCOMPARE(int(regions[0].keyLow), 30);
-    QCOMPARE(int(regions[0].keyHigh), 90);
-    QCOMPARE(int(regions[0].velLow), 10);
-    QCOMPARE(int(regions[0].velHigh), 100);
-    QCOMPARE(regions[0].sample.midiUnityNote, uint32_t(64));
-    QVERIFY(regions[0].sample.hasLoop);
-    QCOMPARE(regions[0].sample.loopStart, uint32_t(10));
-    QCOMPARE(regions[0].sample.loopEnd, uint32_t(90));
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  REQUIRE(approxEq(int(regions[0].keyLow), 30));
+  REQUIRE(approxEq(int(regions[0].keyHigh), 90));
+  REQUIRE(approxEq(int(regions[0].velLow), 10));
+  REQUIRE(approxEq(int(regions[0].velHigh), 100));
+  REQUIRE(approxEq(regions[0].sample.midiUnityNote, uint32_t(64)));
+  REQUIRE(regions[0].sample.hasLoop);
+  REQUIRE(approxEq(regions[0].sample.loopStart, uint32_t(10)));
+  REQUIRE(approxEq(regions[0].sample.loopEnd, uint32_t(90)));
 
-    auto loaded = loadGigFileSamples(info, RATE, {});
-    QVERIFY(loaded);
-    QCOMPARE(loaded->instruments[0].regions.size(), std::size_t(1));
-    auto& sample = loaded->instruments[0].regions[0].sample;
-    QVERIFY(sample.data && !sample.data->empty());
-    QCOMPARE((*sample.data)[0].size(), std::size_t(FRAMES));
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  REQUIRE(approxEq(loaded->instruments[0].regions.size(), std::size_t(1)));
+  auto& sample = loaded->instruments[0].regions[0].sample;
+  REQUIRE((sample.data && !sample.data->empty()));
+  REQUIRE(approxEq((*sample.data)[0].size(), std::size_t(FRAMES)));
 
-    auto ramp = rampData();
-    for(int i : {0, 50, FRAMES - 1})
-      QVERIFY(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
-  }
-};
-
-QTEST_APPLESS_MAIN(GigLoaderTest)
-#include "GigLoaderTest.moc"
+  auto ramp = rampData();
+  for(int i : {0, 50, FRAMES - 1})
+    REQUIRE(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
+}
