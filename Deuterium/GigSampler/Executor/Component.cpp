@@ -36,9 +36,11 @@ struct gig_voice
   PlayHead head;
   ResolvedLoop loop;
   Lfo lfo;
-  Lfo vibLfo; // file-specified vibrato (SF2 vibLfo generators)
+  Lfo vibLfo;          // file-specified vibrato (SF2 vibLfo generators)
+  Lfo modLfo;          // file-specified modLfo (tremolo / wah / pitch)
   PitchEnv pitchEnv;
   BlockEnv filterEnv;
+  BlockEnv fileModEnv; // file-specified modulation envelope (SF2 EG2)
   GlideState glide;
 
   int note{-1};
@@ -56,6 +58,7 @@ struct gig_voice
   double chokeGain{1.};
   double gain{1.};       // velocity * zone crossfade * region attenuation
   double randomSemis{};
+  double velFcCents{};   // default velocity->cutoff modulator, fixed at note-on
 };
 
 class gigsampler_node final : public ossia::graph_node
@@ -193,6 +196,7 @@ public:
       {
         v.amp_adsr.startRelease();
         v.filterEnv.release();
+        v.fileModEnv.release();
         v.released = true;
       }
     }
@@ -297,7 +301,12 @@ public:
       if(channels == 0)
         continue;
 
-      const int64_t totalFrames = std::ssize(sampleData[0]);
+      // SF2 endAddrsOffset trims trailing frames off the playable range
+      int64_t totalFrames = std::ssize(sampleData[0]);
+      if(region.sampleEndOffset > 0)
+        totalFrames = std::max<int64_t>(
+            {(int64_t)1, totalFrames - (int64_t)region.sampleEndOffset,
+             (int64_t)voice.loop.end});
 
       // ---- block-rate modulation ----
       const double blockFrames = timings.length;
@@ -316,6 +325,31 @@ public:
         semis += voice.vibLfo.advanceBlock(
                      blockFrames, region.vibLfoFreq, region.vibLfoDelay, m_sampleRate)
                  * region.vibLfoToPitch / 100.0;
+
+      // File-specified modLfo (tremolo / filter wobble / pitch) and
+      // modulation envelope (SF2 EG2 -> pitch / cutoff)
+      double fileFcCents = voice.velFcCents;
+      double fileGain = 1.;
+      if(region.modLfoToPitch != 0.f || region.modLfoToFc != 0.f
+         || region.modLfoToVol != 0.f)
+      {
+        const double m = voice.modLfo.advanceBlock(
+            blockFrames, region.modLfoFreq, region.modLfoDelay, m_sampleRate);
+        semis += m * region.modLfoToPitch / 100.0;
+        fileFcCents += m * region.modLfoToFc;
+        if(region.modLfoToVol != 0.f)
+          fileGain *= std::pow(10.0, m * -region.modLfoToVol / 200.0);
+      }
+      if(region.modEnvToPitch != 0.f || region.modEnvToFc != 0.f)
+      {
+        // Delay and hold folded into the neighboring stages (block rate)
+        const double e = voice.fileModEnv.advanceBlock(
+            blockFrames, region.eg2Delay + region.eg2Attack,
+            region.eg2Hold + region.eg2Decay, region.eg2Sustain, region.eg2Release,
+            m_sampleRate);
+        semis += e * region.modEnvToPitch / 100.0;
+        fileFcCents += e * region.modEnvToFc;
+      }
       const double ratio = semitonesToRatio(semis);
 
       const double fenv = voice.filterEnv.advanceBlock(
@@ -325,7 +359,8 @@ public:
       {
         double octaves = 4.0 * p.filterEnvAmount * fenv
                          + 2.0 * p.velToCutoff * (voice.velocity / 127.0)
-                         + p.filterKeytrack * (voice.note - 60) / 12.0;
+                         + p.filterKeytrack * (voice.note - 60) / 12.0
+                         + fileFcCents / 1200.0;
         if(p.lfoDest == SamplerParams::LfoCutoff)
           octaves += lfoVal * p.lfoDepth * 4.0;
         voice.filter.configure(
@@ -333,9 +368,9 @@ public:
             m_sampleRate, voice.filterGain);
       }
 
-      double gainMod = 1.;
+      double gainMod = fileGain;
       if(p.lfoDest == SamplerParams::LfoAmp)
-        gainMod = 1. - p.lfoDepth * 0.5 * (1. + lfoVal); // tremolo, downwards
+        gainMod *= 1. - p.lfoDepth * 0.5 * (1. + lfoVal); // tremolo, downwards
       double panMod = 0.;
       if(p.lfoDest == SamplerParams::LfoPan)
         panMod = lfoVal * p.lfoDepth;
@@ -600,6 +635,7 @@ private:
 
       voice.amp_adsr.startRelease();
       voice.filterEnv.release();
+      voice.fileModEnv.release();
       voice.released = true;
     }
 
@@ -669,10 +705,17 @@ private:
     voice.chokeGain = 1.0;
     voice.oneShotEff = region.oneShot || fromRelease;
 
+    // Effective key / velocity: the SF2 keynum / velocity generators pin
+    // them for pitch and gain purposes while matching and note-off keep the
+    // played values
+    const int pitchKey = region.forcedKey >= 0 ? region.forcedKey : note;
+    const int pitchMatch = region.forcedKey >= 0 ? region.forcedKey : matchNote;
+    const int effVel = region.forcedVelocity >= 0 ? region.forcedVelocity : velocity;
+
     // Pitch: static part (matched note for keytracking, plus the chromatic
     // distance to the played note) + glide start; live modulation per block
     const double base
-        = basePitchSemitones(region, p, matchNote) + (note - matchNote);
+        = basePitchSemitones(region, p, pitchMatch) + (pitchKey - pitchMatch);
     voice.randomSemis = region.randomPitch > 0
                             ? region.randomPitch * (2.0 * random01() - 1.0)
                             : 0.;
@@ -690,7 +733,7 @@ private:
 
     // Start position: region offset + global/velocity start offset
     const double startFrac = std::clamp(
-        p.startOffset + p.velToStart * (1.0 - velocity / 127.0), 0., 0.95);
+        p.startOffset + p.velToStart * (1.0 - effVel / 127.0), 0., 0.95);
     int64_t startFrames
         = region.sampleStartOffset + (int64_t)(startFrac * frames);
     startFrames = std::clamp<int64_t>(startFrames, 0, frames - 1);
@@ -708,8 +751,14 @@ private:
     voice.loop = resolveLoop(region, p, frames);
 
     // Gain: velocity curve, zone crossfade, region attenuation
-    voice.gain = region.sampleAttenuation * velocityGain(region, p, velocity)
-                 * velocityZoneGain(region, velocity, p.velXfade);
+    voice.gain = region.sampleAttenuation * velocityGain(region, p, effVel)
+                 * velocityZoneGain(region, effVel, p.velXfade);
+
+    // Default SF2 velocity->cutoff modulator (can be overridden or zeroed by
+    // the bank): active for velocities >= 64, in cents of cutoff change
+    voice.velFcCents = 0.;
+    if(region.velToFcCents != 0.f && effVel >= 64)
+      voice.velFcCents = region.velToFcCents * (1.0 - effVel / 127.0);
 
     // Amplitude envelope (per-sample); global override wins
     const auto env = resolveEnvelope(region, p);
@@ -747,10 +796,16 @@ private:
     switch(p.filterType)
     {
       case SamplerParams::FilterFromFile:
-        voice.filterOn = region.vcfEnabled;
+        // The default velocity->cutoff modulator needs a running filter even
+        // when the region declares none (base = wide open then)
+        voice.filterOn = region.vcfEnabled || voice.velFcCents != 0.;
         voice.filterTypeEff = SamplerParams::FilterLowpass;
-        voice.cutoffBaseHz
-            = 20.0 * std::pow(1000.0, region.vcfCutoff / 127.0);
+        if(!region.vcfEnabled)
+          voice.cutoffBaseHz = 19912.; // 13500 cents, the SF2 open default
+        else if(region.vcfCutoffHz >= 0.f)
+          voice.cutoffBaseHz = region.vcfCutoffHz;
+        else
+          voice.cutoffBaseHz = 20.0 * std::pow(1000.0, region.vcfCutoff / 127.0);
         if(region.vcfQCb >= 0.f)
         {
           // SF2 convention: q in dB = cB/10 - 3.01 (so Q = 0 has no
@@ -784,8 +839,11 @@ private:
 
     voice.filterEnv = {};
     voice.filterEnv.trigger();
+    voice.fileModEnv = {};
+    voice.fileModEnv.trigger();
     voice.lfo = {};
     voice.vibLfo = {};
+    voice.modLfo = {};
     voice.lofi = {};
   }
 

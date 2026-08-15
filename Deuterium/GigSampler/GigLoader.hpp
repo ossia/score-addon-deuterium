@@ -75,6 +75,38 @@ struct GigRegion
   float vibLfoFreq{4.f};   // Hz
   float vibLfoDelay{0.f};  // seconds
 
+  // File-specified modLfo (SF2): tremolo / filter wobble / pitch
+  float modLfoToPitch{0.f}; // cents, 0 = none
+  float modLfoToFc{0.f};    // cents
+  float modLfoToVol{0.f};   // centibels
+  float modLfoFreq{4.f};    // Hz
+  float modLfoDelay{0.f};   // seconds
+
+  // File-specified modulation envelope (SF2 EG2) -> pitch / cutoff
+  float modEnvToPitch{0.f}; // cents, 0 = none
+  float modEnvToFc{0.f};    // cents
+  float eg2Delay{0.f}, eg2Attack{0.f}, eg2Hold{0.f}, eg2Decay{0.f};
+  float eg2Sustain{1.f}; // 0..1 fraction of the envelope peak
+  float eg2Release{0.f};
+
+  // Exact filter cutoff when the file specifies one (Hz); < 0 = use the
+  // quantized vcfCutoff byte (gig / Hydrogen paths)
+  float vcfCutoffHz{-1.f};
+
+  // SF2 default velocity->cutoff modulator amount in cents (0 = disabled;
+  // banks can override it, including to 0); applies for velocities >= 64
+  float velToFcCents{0.f};
+
+  // Instrument-zone key / velocity overrides (SF2 gens 46/47); -1 = none.
+  // Zone matching and note-off use the played values, pitch and velocity
+  // response use these.
+  int forcedKey{-1};
+  int forcedVelocity{-1};
+
+  // Trailing frames cut off the sample end (SF2 endAddrsOffset, stored
+  // positive); rescaled with the loop points when resampling
+  uint32_t sampleEndOffset{0};
+
   // Drum-style behavior (Hydrogen kits; also expressible by other formats)
   bool oneShot{false};       // ignore note-off, play until the sample ends
   bool muted{false};         // region loaded but never triggered
