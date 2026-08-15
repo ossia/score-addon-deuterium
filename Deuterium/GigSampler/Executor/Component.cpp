@@ -6,6 +6,7 @@
 
 #include <core/document/Document.hpp>
 
+#include <QPointer>
 #include <QTimer>
 
 #include <ossia/dataflow/execution_state.hpp>
@@ -845,11 +846,13 @@ Component::Component(
   // values (including graph modulation) back onto the inlets so the UI
   // widgets can display them.
   std::weak_ptr<gigsampler_node> weak_node = node;
-  con(ctx.doc.coarseUpdateTimer, &QTimer::timeout, this, [weak_node, &proc] {
+  con(ctx.doc.coarseUpdateTimer, &QTimer::timeout, this,
+      [weak_node, proc = QPointer<Deuterium::Gig::ProcessModel>{&proc}] {
     auto node = weak_node.lock();
-    if(!node)
+    // The model can be deleted before this component during teardown
+    if(!node || !proc)
       return;
-    const auto& inlets = proc.inlets();
+    const auto& inlets = proc->inlets();
     for(int i = 0; i < ControlCount && 1 + i < std::ssize(inlets); i++)
     {
       auto* ctl = qobject_cast<Process::ControlInlet*>(inlets[1 + i]);
