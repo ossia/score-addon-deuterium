@@ -15,14 +15,6 @@ project(score_addon_deuterium LANGUAGES CXX)
 
 score_common_setup()
 
-# QtXml is part of qtbase but its target only exists once requested
-# (the Hydrogen drumkit.xml loader needs it)
-find_package(${QT_VERSION} COMPONENTS Xml)
-if(NOT TARGET ${QT_PREFIX}::Xml)
-  message(STATUS "score-addon-deuterium: QtXml not available, skipping")
-  return()
-endif()
-
 # libgig-modified sources (compiled directly into the plugin)
 set(LIBGIG_DIR "${CMAKE_CURRENT_SOURCE_DIR}/3rdparty/libgig-modified")
 
@@ -145,7 +137,6 @@ target_link_libraries(
     score_lib_base score_plugin_engine score_plugin_media
 
   PRIVATE
-    ${QT_PREFIX}::Xml
 
     $<BUILD_INTERFACE:dspfilters>
     $<BUILD_INTERFACE:gamma>

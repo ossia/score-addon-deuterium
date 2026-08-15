@@ -18,9 +18,9 @@ endif()
 if(COMMAND score_setup_catch2)
   score_setup_catch2()
 endif()
-find_package(${QT_VERSION} COMPONENTS Core Xml)
-if(NOT TARGET Catch2::Catch2WithMain OR NOT TARGET ${QT_PREFIX}::Xml)
-  message(STATUS "score-addon-deuterium: Catch2/QtXml not available, skipping tests")
+find_package(${QT_VERSION} COMPONENTS Core)
+if(NOT TARGET Catch2::Catch2WithMain)
+  message(STATUS "score-addon-deuterium: Catch2 not available, skipping tests")
   return()
 endif()
 
@@ -53,7 +53,6 @@ function(add_deuterium_tool TESTNAME TESTSRCS)
   )
   target_link_libraries(${TESTNAME} PRIVATE
     score_lib_base score_plugin_engine score_plugin_media score_plugin_dataflow
-    ${QT_PREFIX}::Xml
   )
   foreach(_src ${LIBGIG_SRCS})
     set_source_files_properties(${_src} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)

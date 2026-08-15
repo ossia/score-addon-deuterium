@@ -50,7 +50,8 @@ struct SamplerParams
   float velToCutoff{0.f}; // 0..1
 
   float velAmount{1.f};  // 0..1: how much velocity scales the gain
-  int velCurve{0};       // 0 linear, 1 soft (concave), 2 hard (convex)
+  int velCurve{2};       // 0 linear, 1 soft (sqrt), 2 hard (v^2, the SF2
+                         // default velocity-to-attenuation curve)
   float velToStart{0.f}; // 0..1: softer hits start later in the sample
   float velXfade{0.f};   // 0..1: crossfade across velocity-zone edges
 
@@ -155,7 +156,7 @@ basePitchSemitones(const GigRegion& r, const SamplerParams& p, int note) noexcep
   double st = r.pitchOffset + r.sample.fineTune / 100.0 + p.transpose
               + p.fineTune / 100.0;
   if(r.pitchTrack)
-    st += note - (int)r.sample.midiUnityNote;
+    st += (note - (int)r.sample.midiUnityNote) * r.keyScale;
   return st;
 }
 
@@ -190,7 +191,7 @@ resolveLoop(const GigRegion& r, const SamplerParams& p, int64_t frames) noexcept
   switch(p.loopMode)
   {
     case SamplerParams::LoopFromFile:
-      loop.mode = fileLoop ? 1 : 0;
+      loop.mode = fileLoop ? (r.sample.loopUntilRelease ? 3 : 1) : 0;
       break;
     case SamplerParams::LoopOff:
       loop.mode = 0;
@@ -312,7 +313,11 @@ struct Biquad
   void reset() noexcept { x1 = x2 = y1 = y2 = x1r = x2r = y1r = y2r = 0.; }
 
   // type: SamplerParams::FilterLowpass..FilterNotch. q >= 0.5 recommended.
-  void configure(int type, double cutoffHz, double q, double sampleRate) noexcept
+  // `gain` scales the numerator: file-driven filters use it to take part of
+  // the resonance peak out of the passband (SF2 convention).
+  void configure(
+      int type, double cutoffHz, double q, double sampleRate,
+      double gain = 1.) noexcept
   {
     cutoffHz = std::clamp(cutoffHz, 10., sampleRate * 0.49);
     q = std::clamp(q, 0.1, 40.);
@@ -347,9 +352,9 @@ struct Biquad
     A0 = 1. + alpha;
     A1 = -2. * cw;
     A2 = 1. - alpha;
-    b0 = B0 / A0;
-    b1 = B1 / A0;
-    b2 = B2 / A0;
+    b0 = gain * B0 / A0;
+    b1 = gain * B1 / A0;
+    b2 = gain * B2 / A0;
     a1 = A1 / A0;
     a2 = A2 / A0;
   }

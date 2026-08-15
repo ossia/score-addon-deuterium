@@ -159,12 +159,14 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
   flt(VelToCutoff, 0.f, 1.f, 0.f, QStringLiteral("Vel > cutoff"));
 
   flt(VelAmount, 0.f, 1.f, 1.f, QStringLiteral("Vel > volume"));
+  // "Hard" (v^2) is exactly the SF2 default velocity-to-attenuation curve
+  // (concave, 960 cB): the default every mainstream SoundFont player uses
   combo(
       VelCurve,
       {{QStringLiteral("Linear"), 0},
        {QStringLiteral("Soft"), 1},
        {QStringLiteral("Hard"), 2}},
-      0, QStringLiteral("Vel curve"));
+      2, QStringLiteral("Vel curve"));
   flt(VelToStart, 0.f, 1.f, 0.f, QStringLiteral("Vel > start"));
   flt(VelXfade, 0.f, 1.f, 0.f, QStringLiteral("Layer crossfade"));
 

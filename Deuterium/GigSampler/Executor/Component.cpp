@@ -38,6 +38,7 @@ struct gig_voice
   PlayHead head;
   ResolvedLoop loop;
   Lfo lfo;
+  Lfo vibLfo; // file-specified vibrato (SF2 vibLfo generators)
   PitchEnv pitchEnv;
   BlockEnv filterEnv;
   GlideState glide;
@@ -53,6 +54,7 @@ struct gig_voice
   int filterTypeEff{};
   double cutoffBaseHz{20000.};
   double q{1.};
+  double filterGain{1.}; // passband compensation for file-driven resonance
   double chokeGain{1.};
   double gain{1.};       // velocity * zone crossfade * region attenuation
   double randomSemis{};
@@ -311,6 +313,11 @@ public:
                      + voice.pitchEnv.value;
       if(p.lfoDest == SamplerParams::LfoPitch)
         semis += lfoVal * p.lfoDepth * 2.0; // up to +-2 semitones of vibrato
+      // File-specified vibrato (SF2 vibLfo), on top of the user LFO
+      if(region.vibLfoToPitch != 0.f)
+        semis += voice.vibLfo.advanceBlock(
+                     blockFrames, region.vibLfoFreq, region.vibLfoDelay, m_sampleRate)
+                 * region.vibLfoToPitch / 100.0;
       const double ratio = semitonesToRatio(semis);
 
       const double fenv = voice.filterEnv.advanceBlock(
@@ -325,7 +332,7 @@ public:
           octaves += lfoVal * p.lfoDepth * 4.0;
         voice.filter.configure(
             voice.filterTypeEff, voice.cutoffBaseHz * std::exp2(octaves), voice.q,
-            m_sampleRate);
+            m_sampleRate, voice.filterGain);
       }
 
       double gainMod = 1.;
@@ -337,15 +344,20 @@ public:
 
       const double pan
           = std::clamp(region.pan / 64.0 + p.pan + panMod, -1., 1.);
-      const double panR = (pan + 1.) * 0.5;
-      const double panL = 1. - panR;
+      // Constant-power law (SF2 / FluidSynth): centre is -3 dB per side,
+      // not -6 dB, so centred and hard-panned regions balance correctly
+      const double panTheta = (pan + 1.) * (M_PI / 4.);
+      const double panL = std::cos(panTheta);
+      const double panR = std::sin(panTheta);
       const double gainTotal = voice.gain * p.volume * gainMod;
 
       // Anti-click fadeout near the end of non-looping playback
       const int64_t fadeSamples = (int64_t)(m_sampleRate * 0.00075);
 
+      // Exclusive-class cut: a fast-but-audible fade (FluidSynth forces a
+      // ~0.3 s release; a 10 ms chop was found too abrupt on open hi-hats)
       const double chokeStep
-          = voice.choked ? 1.0 / std::max(1.0, m_sampleRate * 0.010) : 0.0;
+          = voice.choked ? 1.0 / std::max(1.0, m_sampleRate * 0.3) : 0.0;
 
       for(int64_t k = 0; k < timings.length; k++)
       {
@@ -710,9 +722,17 @@ private:
     const double attack
         = legatoTransfer && region.pitchTrack ? 0.003 : std::max(0.001, env.attack);
     voice.amp_adsr.attack(attack);
-    voice.amp_adsr.decay(std::max(0.001, env.decay));
+    // High notes decay faster (SF2 keynumToVolEnvDecay, timecents per key
+    // relative to key 60)
+    double decay = std::max(0.001, env.decay);
+    if(region.keynumToDecay != 0.f)
+      decay = std::clamp(
+          decay * std::exp2(region.keynumToDecay * (60 - note) / 1200.0), 0.001,
+          120.0);
+    voice.amp_adsr.decay(decay);
     voice.amp_adsr.sustain(env.sustain);
-    voice.amp_adsr.release(std::max(0.005, env.release));
+    // 16 ms floor like FluidSynth: shorter releases click
+    voice.amp_adsr.release(std::max(0.016, env.release));
     voice.amp_adsr.amp(1.0);
 
     // Filter
@@ -724,7 +744,20 @@ private:
         voice.filterTypeEff = SamplerParams::FilterLowpass;
         voice.cutoffBaseHz
             = 20.0 * std::pow(1000.0, region.vcfCutoff / 127.0);
-        voice.q = 1.0 + region.vcfResonance * 9.0 / 127.0;
+        if(region.vcfQCb >= 0.f)
+        {
+          // SF2 convention: q in dB = cB/10 - 3.01 (so Q = 0 has no
+          // resonance hump), and half the peak height is taken out of the
+          // passband via the gain compensation
+          const double qDb = region.vcfQCb / 10.0 - 3.01;
+          voice.q = std::pow(10.0, qDb / 20.0);
+          voice.filterGain = 1.0 / std::sqrt(std::max(voice.q, 0.1));
+        }
+        else
+        {
+          voice.q = 1.0 + region.vcfResonance * 9.0 / 127.0;
+          voice.filterGain = 1.0;
+        }
         break;
       case SamplerParams::FilterOff:
         voice.filterOn = false;
@@ -734,15 +767,18 @@ private:
         voice.filterTypeEff = p.filterType;
         voice.cutoffBaseHz = p.cutoff;
         voice.q = 0.5 + p.resonance * 9.5;
+        voice.filterGain = 1.0;
         break;
     }
     if(voice.filterOn)
       voice.filter.configure(
-          voice.filterTypeEff, voice.cutoffBaseHz, voice.q, m_sampleRate);
+          voice.filterTypeEff, voice.cutoffBaseHz, voice.q, m_sampleRate,
+          voice.filterGain);
 
     voice.filterEnv = {};
     voice.filterEnv.trigger();
     voice.lfo = {};
+    voice.vibLfo = {};
     voice.lofi = {};
   }
 

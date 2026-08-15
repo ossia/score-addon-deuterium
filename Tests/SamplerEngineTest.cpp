@@ -58,6 +58,7 @@ TEST_CASE("engine: velocity_curve", "[deuterium]")
   SamplerParams p;
   p.velAmount = 1.f;
 
+  p.velCurve = 0; // the default is 2 (hard, the SF2 curve)
   const double lin = velocityGain(r, p, 64);
   p.velCurve = 1; // soft
   const double soft = velocityGain(r, p, 64);
