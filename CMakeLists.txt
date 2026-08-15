@@ -70,7 +70,10 @@ set(SRCS
 add_library(${PROJECT_NAME} ${SRCS} ${HDRS})
 
 # TODO make this automatic in some way, and extend to other components
-score_generate_command_list_file(${PROJECT_NAME} "${HDRS}")
+# (missing from the SDK external-addon mode; this addon defines no commands)
+if(COMMAND score_generate_command_list_file)
+  score_generate_command_list_file(${PROJECT_NAME} "${HDRS}")
+endif()
 
 # libgig compile definitions and include path
 target_include_directories(${PROJECT_NAME} PRIVATE "${LIBGIG_DIR}/src")
