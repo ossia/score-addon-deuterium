@@ -28,10 +28,14 @@ enum SamplerControl : int
   Resonance,
   FilterKeytrack,
   FilterEnvAmount,
+  FilterEnvAttack,
   FilterEnvDecay,
+  FilterEnvSustain,
+  FilterEnvRelease,
   VelToCutoff,
 
   VelAmount,
+  VelCurve,
   VelToStart,
   VelXfade,
 
@@ -96,10 +100,19 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
   flt(Resonance, 0.f, 1.f, 0.f, QStringLiteral("Resonance"));
   flt(FilterKeytrack, 0.f, 1.f, 0.f, QStringLiteral("Filter keytrack"));
   flt(FilterEnvAmount, -1.f, 1.f, 0.f, QStringLiteral("Filter env"));
+  flt(FilterEnvAttack, 0.001f, 5.f, 0.001f, QStringLiteral("Filter env attack"));
   flt(FilterEnvDecay, 0.001f, 5.f, 0.15f, QStringLiteral("Filter env decay"));
+  flt(FilterEnvSustain, 0.f, 1.f, 0.f, QStringLiteral("Filter env sustain"));
+  flt(FilterEnvRelease, 0.001f, 8.f, 0.05f, QStringLiteral("Filter env release"));
   flt(VelToCutoff, 0.f, 1.f, 0.f, QStringLiteral("Vel > cutoff"));
 
   flt(VelAmount, 0.f, 1.f, 1.f, QStringLiteral("Vel > volume"));
+  combo(
+      VelCurve,
+      {{QStringLiteral("Linear"), 0},
+       {QStringLiteral("Soft"), 1},
+       {QStringLiteral("Hard"), 2}},
+      0, QStringLiteral("Vel curve"));
   flt(VelToStart, 0.f, 1.f, 0.f, QStringLiteral("Vel > start"));
   flt(VelXfade, 0.f, 1.f, 0.f, QStringLiteral("Layer crossfade"));
 

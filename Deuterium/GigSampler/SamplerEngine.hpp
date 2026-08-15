@@ -50,6 +50,7 @@ struct SamplerParams
   float velToCutoff{0.f}; // 0..1
 
   float velAmount{1.f};  // 0..1: how much velocity scales the gain
+  int velCurve{0};       // 0 linear, 1 soft (concave), 2 hard (convex)
   float velToStart{0.f}; // 0..1: softer hits start later in the sample
   float velXfade{0.f};   // 0..1: crossfade across velocity-zone edges
 
@@ -116,7 +117,11 @@ inline double velocityGain(const GigRegion& r, const SamplerParams& p, int veloc
 {
   if(!r.applyVelocity)
     return 1.0;
-  const double v = std::clamp(velocity, 0, 127) / 127.0;
+  double v = std::clamp(velocity, 0, 127) / 127.0;
+  if(p.velCurve == 1)
+    v = std::sqrt(v); // soft: quiet hits come up
+  else if(p.velCurve == 2)
+    v = v * v; // hard: exaggerated dynamics
   const double amount = std::clamp<double>(p.velAmount, 0., 1.);
   return 1.0 + amount * (v - 1.0);
 }

@@ -57,6 +57,29 @@ private Q_SLOTS:
     QVERIFY(std::abs(velocityGain(r, p, 0) - 1.) < 1e-9);
   }
 
+  void test_velocity_curve()
+  {
+    auto r = makeRegion();
+    SamplerParams p;
+    p.velAmount = 1.f;
+
+    const double lin = velocityGain(r, p, 64);
+    p.velCurve = 1; // soft
+    const double soft = velocityGain(r, p, 64);
+    p.velCurve = 2; // hard
+    const double hard = velocityGain(r, p, 64);
+
+    // Soft raises quiet hits, hard lowers them; extremes are unchanged
+    QVERIFY(soft > lin);
+    QVERIFY(hard < lin);
+    for(int curve : {0, 1, 2})
+    {
+      p.velCurve = curve;
+      QVERIFY(std::abs(velocityGain(r, p, 127) - 1.) < 1e-9);
+      QVERIFY(std::abs(velocityGain(r, p, 0) - 0.) < 1e-9);
+    }
+  }
+
   void test_velocity_zone_crossfade()
   {
     auto r = makeRegion();
