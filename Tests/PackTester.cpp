@@ -44,6 +44,7 @@ int testSingleFile(const QString& path, bool metadataOnly)
     return Unloadable;
 
   const int instruments = (int)meta->instruments.size();
+  bool anyPlayable = metadataOnly;
   for(int i = 0; i < instruments; i++)
   {
     auto m = (i == 0) ? meta : loadGigFileMetadata(path, i);
@@ -58,11 +59,14 @@ int testSingleFile(const QString& path, bool metadataOnly)
       auto loaded = loadGigFileSamples(m, 48000, {});
       if(!loaded)
         return LoadFailed;
-      if(loaded->instruments[loaded->selectedInstrument].regions.empty())
-        return EmptyLoad;
+      // Individual empty instruments are common in real banks (bank
+      // variation presets etc.); only a file with no playable instrument
+      // at all is a failure
+      if(!loaded->instruments[loaded->selectedInstrument].regions.empty())
+        anyPlayable = true;
     }
   }
-  return Ok;
+  return anyPlayable ? Ok : EmptyLoad;
 }
 
 struct Result
