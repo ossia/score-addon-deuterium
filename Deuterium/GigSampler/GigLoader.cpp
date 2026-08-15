@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <unordered_map>
 
 namespace Deuterium::Gig
 {
@@ -82,26 +83,75 @@ void sanitizeRegion(GigRegion& r)
     r.sample.midiUnityNote = 60;
 }
 
-// Raw PCM read back from a file, waiting to be converted to double arrays
+// Raw PCM read back from a file, one per unique source sample; regionIndices
+// lists every region referencing it (the decoded audio is shared)
 struct RawSampleBuffer
 {
   std::vector<uint8_t> data;
   int channels{};
   int bitDepth{};
   int64_t totalSamples{};
-  int regionIndex{};
+  uint32_t sourceRate{44100};
+  std::vector<int> regionIndices;
 };
 
-// Converts raw PCM buffer (already loaded via LoadSampleData) into double arrays
-// and resamples to targetRate.
-void convertRawSampleData(
-    const void* rawData, int64_t rawSize, int channels, int bitDepth,
-    int64_t totalSamples, GigSample& out, int targetRate)
+// Precomputes the alternation groups: regions sharing the exact same key and
+// velocity zone are alternatives of one another (round-robin/random). Doing
+// this at load time keeps the audio thread's note-on scan linear.
+void assignAlternationGroups(GigInstrument& instr)
 {
+  std::unordered_map<uint32_t, std::vector<int>> zones;
+  for(std::size_t i = 0; i < instr.regions.size(); i++)
+  {
+    auto& r = instr.regions[i];
+    r.altGroup = -1;
+    r.altIndex = 0;
+    r.altCount = 1;
+    if(r.muted || r.releaseTrigger)
+      continue;
+    const uint32_t key = (uint32_t(r.keyLow) << 24) | (uint32_t(r.keyHigh) << 16)
+                         | (uint32_t(r.velLow) << 8) | uint32_t(r.velHigh);
+    zones[key].push_back((int)i);
+  }
+
+  int group = 0;
+  for(auto& [key, members] : zones)
+  {
+    if(members.size() <= 1)
+      continue;
+    std::stable_sort(members.begin(), members.end(), [&](int a, int b) {
+      return instr.regions[a].rrIndex < instr.regions[b].rrIndex;
+    });
+    const int count = std::min<int>(members.size(), 255);
+    for(int n = 0; n < count; n++)
+    {
+      auto& r = instr.regions[members[n]];
+      r.altGroup = group;
+      r.altIndex = (uint8_t)n;
+      r.altCount = (uint8_t)count;
+    }
+    group++;
+  }
+}
+
+// Converts raw PCM into a shared double array, resampled to targetRate.
+// `ratio` reports the resampling factor actually applied (1 = none) so the
+// per-region loop points and offsets can be rescaled by the caller.
+struct ConvertedSample
+{
+  std::shared_ptr<ossia::audio_array> data;
+  double ratio{1.0};
+  uint32_t rate{44100};
+};
+ConvertedSample convertRawSampleData(
+    const void* rawData, int64_t rawSize, int channels, int bitDepth,
+    int64_t totalSamples, uint32_t sourceRate, int targetRate)
+{
+  ConvertedSample result;
   if(!rawData || rawSize <= 0 || totalSamples <= 0)
-    return;
+    return result;
   if(bitDepth != 8 && bitDepth != 16 && bitDepth != 24)
-    return;
+    return result;
 
   const int outChannels = std::max(1, channels);
 
@@ -111,10 +161,12 @@ void convertRawSampleData(
   const int64_t frameSize = int64_t(outChannels) * (bitDepth / 8);
   totalSamples = std::min(totalSamples, rawSize / frameSize);
   if(totalSamples <= 0)
-    return;
+    return result;
 
-  out.data.resize(outChannels);
-  for(auto& ch : out.data)
+  auto arr = std::make_shared<ossia::audio_array>();
+  auto& out_data = *arr;
+  out_data.resize(outChannels);
+  for(auto& ch : out_data)
     ch.resize(totalSamples);
 
   const auto* raw = static_cast<const uint8_t*>(rawData);
@@ -126,14 +178,14 @@ void convertRawSampleData(
     if(channels == 1)
     {
       for(int64_t i = 0; i < totalSamples; i++)
-        out.data[0][i] = samples[i] * scale;
+        out_data[0][i] = samples[i] * scale;
     }
     else if(channels == 2)
     {
       for(int64_t i = 0; i < totalSamples; i++)
       {
-        out.data[0][i] = samples[i * 2] * scale;
-        out.data[1][i] = samples[i * 2 + 1] * scale;
+        out_data[0][i] = samples[i * 2] * scale;
+        out_data[1][i] = samples[i * 2 + 1] * scale;
       }
     }
   }
@@ -146,7 +198,7 @@ void convertRawSampleData(
       {
         int32_t s = (int32_t)raw[i * 3] | ((int32_t)raw[i * 3 + 1] << 8)
                     | ((int32_t)(int8_t)raw[i * 3 + 2] << 16);
-        out.data[0][i] = s * scale;
+        out_data[0][i] = s * scale;
       }
     }
     else if(channels == 2)
@@ -158,8 +210,8 @@ void convertRawSampleData(
                     | ((int32_t)(int8_t)raw[off + 2] << 16);
         int32_t r = (int32_t)raw[off + 3] | ((int32_t)raw[off + 4] << 8)
                     | ((int32_t)(int8_t)raw[off + 5] << 16);
-        out.data[0][i] = l * scale;
-        out.data[1][i] = r * scale;
+        out_data[0][i] = l * scale;
+        out_data[1][i] = r * scale;
       }
     }
   }
@@ -169,14 +221,14 @@ void convertRawSampleData(
     if(channels == 1)
     {
       for(int64_t i = 0; i < totalSamples; i++)
-        out.data[0][i] = ((int)raw[i] - 128) * scale;
+        out_data[0][i] = ((int)raw[i] - 128) * scale;
     }
     else if(channels == 2)
     {
       for(int64_t i = 0; i < totalSamples; i++)
       {
-        out.data[0][i] = ((int)raw[i * 2] - 128) * scale;
-        out.data[1][i] = ((int)raw[i * 2 + 1] - 128) * scale;
+        out_data[0][i] = ((int)raw[i * 2] - 128) * scale;
+        out_data[1][i] = ((int)raw[i * 2 + 1] - 128) * scale;
       }
     }
   }
@@ -184,62 +236,49 @@ void convertRawSampleData(
   // Never trust the header sample rate: 0 would divide to an infinite ratio
   // below (with an UB float->int cast), and absurd values would make the
   // resampled allocation explode
-  if(out.sampleRate < 4000 || out.sampleRate > 768000)
-    out.sampleRate = (uint32_t)targetRate;
+  if(sourceRate < 4000 || sourceRate > 768000)
+    sourceRate = (uint32_t)targetRate;
+  result.rate = sourceRate;
 
   // Resample to target rate if needed
-  if(out.sampleRate != (uint32_t)targetRate && targetRate > 0)
+  if(sourceRate != (uint32_t)targetRate && targetRate > 0)
   {
-    const double ratio = (double)targetRate / (double)out.sampleRate;
+    const double ratio = (double)targetRate / (double)sourceRate;
     const int64_t newLen = (int64_t)(totalSamples * ratio);
     // The upper bound caps the resampled buffer at 2 GB per channel
     if(newLen > 0 && newLen < (int64_t(1) << 28))
     {
-      ossia::audio_array resampled;
-      resampled.resize(outChannels);
+      auto resampled = std::make_shared<ossia::audio_array>();
+      resampled->resize(outChannels);
       for(int c = 0; c < outChannels; c++)
       {
-        resampled[c].resize(newLen);
+        (*resampled)[c].resize(newLen);
         for(int64_t i = 0; i < newLen; i++)
         {
           double srcPos = i / ratio;
           int64_t idx = (int64_t)srcPos;
           double frac = srcPos - idx;
           if(idx + 1 < totalSamples)
-            resampled[c][i]
-                = out.data[c][idx] * (1.0 - frac) + out.data[c][idx + 1] * frac;
+            (*resampled)[c][i]
+                = out_data[c][idx] * (1.0 - frac) + out_data[c][idx + 1] * frac;
           else if(idx < totalSamples)
-            resampled[c][i] = out.data[c][idx];
+            (*resampled)[c][i] = out_data[c][idx];
           else
-            resampled[c][i] = 0.0;
+            (*resampled)[c][i] = 0.0;
         }
       }
-      out.data = std::move(resampled);
-
-      // Update loop points
-      if(out.hasLoop)
-      {
-        out.loopStart = (uint32_t)(out.loopStart * ratio);
-        out.loopEnd = (uint32_t)(out.loopEnd * ratio);
-      }
-      out.sampleRate = targetRate;
+      arr = std::move(resampled);
+      result.ratio = ratio;
+      result.rate = (uint32_t)targetRate;
     }
   }
 
-  // Clamp loop points to the decoded frame count: files can declare
-  // LoopStart/LoopEnd past the actual sample data, and the render loop
-  // indexes the buffer with these values.
-  if(out.hasLoop && !out.data.empty())
-  {
-    const int64_t frames = (int64_t)out.data[0].size();
-    if((int64_t)out.loopEnd > frames)
-      out.loopEnd = (uint32_t)frames;
-    if(out.loopStart >= out.loopEnd)
-      out.hasLoop = false;
-  }
+  result.data = std::move(arr);
+  return result;
 }
 
-// Convert raw buffers into the destination regions, then drop regions
+// Convert each unique source sample once, share the decoded audio between
+// its regions, rescale per-region loop points and offsets, then drop regions
 // that ended up without sample data.
 void convertAndPrune(
     std::vector<RawSampleBuffer>& rawBuffers, GigInstrument& destInstr,
@@ -259,28 +298,52 @@ void convertAndPrune(
       return;
     }
 
-    auto& region = destInstr.regions[raw.regionIndex];
-    const double originalRate = region.sample.sampleRate;
-    convertRawSampleData(
+    const auto conv = convertRawSampleData(
         raw.data.data(), raw.data.size(), raw.channels, raw.bitDepth,
-        raw.totalSamples, region.sample, targetRate);
+        raw.totalSamples, raw.sourceRate, targetRate);
+    if(!conv.data || conv.data->empty() || (*conv.data)[0].empty())
+      continue;
+    const int64_t frames = (int64_t)(*conv.data)[0].size();
 
-    // Loop points are rescaled inside the conversion; the start offset is
-    // a region property, rescale it here
-    if(region.sampleStartOffset > 0 && originalRate > 0
-       && region.sample.sampleRate != originalRate)
+    for(const int regionIndex : raw.regionIndices)
     {
-      region.sampleStartOffset = (uint16_t)std::clamp<int64_t>(
-          std::llround(
-              region.sampleStartOffset * region.sample.sampleRate / originalRate),
-          0, 65535);
+      auto& region = destInstr.regions[regionIndex];
+      auto& smp = region.sample;
+      smp.data = conv.data;
+      smp.sampleRate = conv.rate;
+
+      if(conv.ratio != 1.0)
+      {
+        if(smp.hasLoop)
+        {
+          smp.loopStart = (uint32_t)(smp.loopStart * conv.ratio);
+          smp.loopEnd = (uint32_t)(smp.loopEnd * conv.ratio);
+        }
+        if(region.sampleStartOffset > 0)
+          region.sampleStartOffset = (uint16_t)std::clamp<int64_t>(
+              std::llround(region.sampleStartOffset * conv.ratio), 0, 65535);
+      }
+
+      // Clamp loop points to the decoded frame count: files can declare
+      // LoopStart/LoopEnd past the actual sample data, and the render loop
+      // indexes the buffer with these values.
+      if(smp.hasLoop)
+      {
+        if((int64_t)smp.loopEnd > frames)
+          smp.loopEnd = (uint32_t)frames;
+        if(smp.loopStart >= smp.loopEnd)
+          smp.hasLoop = false;
+      }
     }
   }
 
   // Remove regions that still have no sample data (failed to load)
   std::erase_if(destInstr.regions, [](const GigRegion& r) {
-    return r.sample.data.empty() || r.sample.data[0].empty();
+    return !r.sample.data || r.sample.data->empty() || (*r.sample.data)[0].empty();
   });
+
+  // Region indices changed: recompute the alternation groups
+  assignAlternationGroups(destInstr);
 }
 
 /////////////////////////////
@@ -476,6 +539,10 @@ bool collectRawBuffers_gig(
 
   const auto& destInstr = info.instruments[info.selectedInstrument];
 
+  // Regions frequently share their sample (velocity layers, stereo pairs):
+  // read and store each source only once
+  std::unordered_map<const void*, std::size_t> seen;
+
   int regionIdx = 0;
   gig::Region* rgn = gigInstr->GetFirstRegion();
   while(rgn)
@@ -496,20 +563,29 @@ bool collectRawBuffers_gig(
       if(regionIdx >= (int)destInstr.regions.size())
         break;
 
-      // Load raw sample data from the gig file
-      gig::buffer_t buf = smp->LoadSampleData();
-      if(buf.pStart && buf.Size > 0)
+      if(auto it = seen.find(smp); it != seen.end())
       {
-        RawSampleBuffer raw;
-        raw.data.resize(buf.Size);
-        std::memcpy(raw.data.data(), buf.pStart, buf.Size);
-        raw.channels = smp->Channels;
-        raw.bitDepth = smp->BitDepth;
-        raw.totalSamples = smp->SamplesTotal;
-        raw.regionIndex = regionIdx;
-        rawBuffers.push_back(std::move(raw));
+        rawBuffers[it->second].regionIndices.push_back(regionIdx);
       }
-      smp->ReleaseSampleData();
+      else
+      {
+        // Load raw sample data from the gig file
+        gig::buffer_t buf = smp->LoadSampleData();
+        if(buf.pStart && buf.Size > 0)
+        {
+          RawSampleBuffer raw;
+          raw.data.resize(buf.Size);
+          std::memcpy(raw.data.data(), buf.pStart, buf.Size);
+          raw.channels = smp->Channels;
+          raw.bitDepth = smp->BitDepth;
+          raw.totalSamples = smp->SamplesTotal;
+          raw.sourceRate = smp->SamplesPerSecond;
+          raw.regionIndices.push_back(regionIdx);
+          seen[smp] = rawBuffers.size();
+          rawBuffers.push_back(std::move(raw));
+        }
+        smp->ReleaseSampleData();
+      }
 
       regionIdx++;
     }
@@ -679,6 +755,8 @@ bool collectRawBuffers_dls(
 
   const auto& destInstr = info.instruments[info.selectedInstrument];
 
+  std::unordered_map<const void*, std::size_t> seen;
+
   int regionIdx = 0;
   for(auto* rgn = dlsInstr->GetFirstRegion(); rgn; rgn = dlsInstr->GetNextRegion())
   {
@@ -692,7 +770,11 @@ bool collectRawBuffers_dls(
     if(regionIdx >= (int)destInstr.regions.size())
       break;
 
-    if(void* p = smp->LoadSampleData())
+    if(auto it = seen.find(smp); it != seen.end())
+    {
+      rawBuffers[it->second].regionIndices.push_back(regionIdx);
+    }
+    else if(void* p = smp->LoadSampleData())
     {
       const int64_t bytes = (int64_t)smp->GetSize() * smp->FrameSize;
       if(bytes > 0)
@@ -703,7 +785,9 @@ bool collectRawBuffers_dls(
         raw.channels = smp->Channels;
         raw.bitDepth = smp->BitDepth;
         raw.totalSamples = smp->SamplesTotal;
-        raw.regionIndex = regionIdx;
+        raw.sourceRate = smp->SamplesPerSecond;
+        raw.regionIndices.push_back(regionIdx);
+        seen[smp] = rawBuffers.size();
         rawBuffers.push_back(std::move(raw));
       }
       smp->ReleaseSampleData();
@@ -869,6 +953,8 @@ bool collectRawBuffers_sf2(
 
   const auto& destInstr = info.instruments[info.selectedInstrument];
 
+  std::unordered_map<const void*, std::size_t> seen;
+
   int regionIdx = 0;
   for(int pr = 0; pr < preset->GetRegionCount(); pr++)
   {
@@ -903,22 +989,31 @@ bool collectRawBuffers_sf2(
       if(regionIdx >= (int)destInstr.regions.size())
         break;
 
-      sf2::Sample::buffer_t buf = smp->LoadSampleData();
-      if(buf.pStart && buf.Size > 0)
+      if(auto it = seen.find(smp); it != seen.end())
       {
-        RawSampleBuffer raw;
-        raw.data.resize(buf.Size);
-        std::memcpy(raw.data.data(), buf.pStart, buf.Size);
-        raw.channels = smp->GetChannelCount();
-        raw.bitDepth
-            = smp->GetChannelCount() > 0
-                  ? 8 * (smp->GetFrameSize() / smp->GetChannelCount())
-                  : 16;
-        raw.totalSamples = smp->GetTotalFrameCount();
-        raw.regionIndex = regionIdx;
-        rawBuffers.push_back(std::move(raw));
+        rawBuffers[it->second].regionIndices.push_back(regionIdx);
       }
-      smp->ReleaseSampleData();
+      else
+      {
+        sf2::Sample::buffer_t buf = smp->LoadSampleData();
+        if(buf.pStart && buf.Size > 0)
+        {
+          RawSampleBuffer raw;
+          raw.data.resize(buf.Size);
+          std::memcpy(raw.data.data(), buf.pStart, buf.Size);
+          raw.channels = smp->GetChannelCount();
+          raw.bitDepth
+              = smp->GetChannelCount() > 0
+                    ? 8 * (smp->GetFrameSize() / smp->GetChannelCount())
+                    : 16;
+          raw.totalSamples = smp->GetTotalFrameCount();
+          raw.sourceRate = smp->SampleRate;
+          raw.regionIndices.push_back(regionIdx);
+          seen[smp] = rawBuffers.size();
+          rawBuffers.push_back(std::move(raw));
+        }
+        smp->ReleaseSampleData();
+      }
 
       regionIdx++;
     }
@@ -1149,6 +1244,7 @@ bool loadSamples_hydrogen(
     const std::shared_ptr<std::atomic<bool>>& cancelled)
 {
   auto& destInstr = info.instruments[info.selectedInstrument];
+  std::unordered_map<std::string, std::shared_ptr<ossia::audio_array>> cache;
   for(auto& region : destInstr.regions)
   {
     if(cancelled && cancelled->load(std::memory_order_relaxed))
@@ -1156,21 +1252,31 @@ bool loadSamples_hydrogen(
     if(region.sample.sourceFile.empty())
       continue;
 
+    if(auto it = cache.find(region.sample.sourceFile); it != cache.end())
+    {
+      region.sample.data = it->second;
+      region.sample.sampleRate = targetRate;
+      continue;
+    }
+
     try
     {
       auto dec = Media::AudioDecoder::decode_synchronous(
           QString::fromStdString(region.sample.sourceFile), targetRate);
       if(dec)
       {
-        region.sample.data = std::move(dec->second);
-        region.sample.sampleRate = targetRate;
+        auto arr = std::make_shared<ossia::audio_array>(std::move(dec->second));
 
         // Float audio files can legitimately contain NaN / inf samples; they
         // must never reach the audio thread (a NaN sticks in the filters)
-        for(auto& channel : region.sample.data)
+        for(auto& channel : *arr)
           for(auto& sample : channel)
             if(!std::isfinite(sample))
               sample = 0.;
+
+        cache[region.sample.sourceFile] = arr;
+        region.sample.data = std::move(arr);
+        region.sample.sampleRate = targetRate;
       }
     }
     catch(...)

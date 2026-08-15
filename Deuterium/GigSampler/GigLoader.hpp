@@ -11,7 +11,9 @@ namespace Deuterium::Gig
 
 struct GigSample
 {
-  ossia::audio_array data;
+  // Decoded audio, shared between all regions that reference the same
+  // source sample (null until phase 2 populated it)
+  std::shared_ptr<ossia::audio_array> data;
   // For samples stored outside the bank file (e.g. Hydrogen drumkit layers):
   // absolute path of the audio file to decode in phase 2
   std::string sourceFile;
@@ -62,6 +64,13 @@ struct GigRegion
                              // round-robin/random dimensions); -1 = none
   int selectionAlgo{0};      // how same-zone alternatives are picked:
                              // 0 = all/velocity, 1 = round-robin, 2 = random
+
+  // Precomputed alternation grouping (regions sharing the exact same key and
+  // velocity zone), so the audio thread never has to group; see
+  // assignAlternationGroups()
+  int altGroup{-1};
+  uint8_t altIndex{0};
+  uint8_t altCount{1};
 
   GigSample sample;
 };
