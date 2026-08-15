@@ -4,6 +4,10 @@
 
 #include <score/tools/Bind.hpp>
 
+#include <core/document/Document.hpp>
+
+#include <QTimer>
+
 #include <ossia/dataflow/execution_state.hpp>
 #include <ossia/dataflow/port.hpp>
 #include <ossia/detail/ssize.hpp>
@@ -15,6 +19,7 @@
 #include <halp/compat/gamma.hpp>
 #include <libremidi/detail/conversion.hpp>
 
+#include <algorithm>
 #include <cmath>
 
 namespace Deuterium::Gig
@@ -93,7 +98,57 @@ public:
 
   void set_control(int control, const ossia::value& v)
   {
+    if(isTimeControl(control))
+    {
+      if(auto vec = v.target<ossia::vec2f>())
+      {
+        auto& raw = m_timeRaw[control];
+        raw.x = (*vec)[0];
+        raw.sync = (*vec)[1] != 0.f; // widget convention: y == 0 is free-running
+        raw.is_vec = true;
+        resolve_time(control);
+        m_feedback[control][0] = raw.x;
+        m_feedback[control][1] = raw.sync ? 1.f : 0.f;
+        return;
+      }
+      // Plain float (legacy documents, values mapped through the graph):
+      // historical unit — seconds, except LfoRate where it is Hz.
+      m_timeRaw[control].is_vec = false;
+    }
     applySamplerControl(m_params, control, v);
+    m_feedback[control][0] = ossia::convert<float>(v);
+    m_feedback[control][1] = 0.f;
+  }
+
+  // Turns the stored {x, sync} of a time control into the engine's unit
+  // (seconds, Hz for the LFO) at the current tempo.
+  void resolve_time(int control) noexcept
+  {
+    const auto& raw = m_timeRaw[control];
+    if(!raw.is_vec)
+      return;
+    const float secs = raw.sync ? syncTimeToSeconds(raw.x, m_tempo) : raw.x;
+    switch(control)
+    {
+      case FilterEnvAttack:
+        m_params.filterEnvAttack = secs;
+        break;
+      case FilterEnvDecay:
+        m_params.filterEnvDecay = secs;
+        break;
+      case FilterEnvRelease:
+        m_params.filterEnvRelease = secs;
+        break;
+      case Glide:
+        m_params.glide = secs;
+        break;
+      case LfoDelay:
+        m_params.lfoDelay = secs;
+        break;
+      case LfoRate:
+        m_params.lfoRate = 1.f / std::clamp(secs, 1e-3f, 1e3f);
+        break;
+    }
   }
 
   [[nodiscard]] std::string label() const noexcept override { return "gigsampler"; }
@@ -113,12 +168,21 @@ public:
 
   void run(const ossia::token_request& tk, ossia::exec_state_facade estate) noexcept override
   {
+    // Tempo-synced time controls follow the transport's tempo.
+    if(tk.tempo > 0 && tk.tempo != m_tempo)
+    {
+      m_tempo = tk.tempo;
+      for(int i = 0; i < ControlCount; i++)
+        if(isTimeControl(i))
+          resolve_time(i);
+    }
+
     // Values arriving through the graph (cables, LFOs, automation) land in
     // the control ports; apply them before rendering. UI edits reach
     // m_params directly through set_control().
     for(int i = 0; i < ControlCount; i++)
       for(const ossia::timed_value& v : control_ins[i]->data.get_data())
-        applySamplerControl(m_params, i, v.value);
+        set_control(i, v.value);
 
     if(!m_gigInfo)
       return;
@@ -678,6 +742,20 @@ public:
   ossia::audio_outlet* audio_out{};
   std::vector<gig_voice> m_voices;
   SamplerParams m_params;
+
+  struct TimeRaw
+  {
+    float x{};
+    bool sync{};
+    bool is_vec{};
+  };
+  TimeRaw m_timeRaw[ControlCount]{};
+  double m_tempo{ossia::root_tempo};
+
+  // Effective control values, read from the UI thread by the feedback timer.
+  // Benign torn reads, like the other executors' control feedback.
+  float m_feedback[ControlCount][2]{};
+
   double m_sampleRate{48000.0};
   double m_bend{};
   double m_lastPitchSemis{};
@@ -704,7 +782,10 @@ Component::Component(
 
   m_ossia_process = std::make_shared<ossia::node_process>(node);
 
-  // Control inlets: initial values now, updates through the command queue
+  // Control inlets: initial values now, updates through the command queue.
+  // setupExecution registers the control's type and domain on the execution
+  // port, which is what lets the graph map modulation sources (LFOs,
+  // automations) onto the control's range.
   const auto& inlets = proc.inlets();
   for(int i = 0; i < ControlCount && 1 + i < std::ssize(inlets); i++)
   {
@@ -712,12 +793,42 @@ Component::Component(
     if(!ctl)
       continue;
     node->set_control(i, ctl->value());
+    ctl->setupExecution(*node->control_ins[i], this);
     connect(
         ctl, &Process::ControlInlet::valueChanged, this,
         [this, node, i](const ossia::value& v) {
       in_exec([node, i, v] { node->set_control(i, v); });
     });
   }
+
+  // Control feedback: periodically reflect the effective execution-side
+  // values (including graph modulation) back onto the inlets so the UI
+  // widgets can display them.
+  std::weak_ptr<gigsampler_node> weak_node = node;
+  con(ctx.doc.coarseUpdateTimer, &QTimer::timeout, this, [weak_node, &proc] {
+    auto node = weak_node.lock();
+    if(!node)
+      return;
+    const auto& inlets = proc.inlets();
+    for(int i = 0; i < ControlCount && 1 + i < std::ssize(inlets); i++)
+    {
+      auto* ctl = qobject_cast<Process::ControlInlet*>(inlets[1 + i]);
+      if(!ctl)
+        continue;
+      const float a = node->m_feedback[i][0];
+      const float b = node->m_feedback[i][1];
+      if(dynamic_cast<Process::TimeChooser*>(ctl))
+        ctl->setExecutionValue(ossia::vec2f{a, b});
+      else if(dynamic_cast<Process::Toggle*>(ctl))
+        ctl->setExecutionValue(a != 0.f);
+      else if(
+          dynamic_cast<Process::IntSlider*>(ctl)
+          || dynamic_cast<Process::ComboBox*>(ctl))
+        ctl->setExecutionValue(int(a));
+      else
+        ctl->setExecutionValue(a);
+    }
+  });
 
   connect(&proc, &Deuterium::Gig::ProcessModel::fileChanged, this, [this, node] {
     // gi may be null (load failed): reload with an empty file to stop playback

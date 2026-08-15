@@ -1,6 +1,7 @@
 // Unit tests for the pure DSP helpers of the sampler engine: pitch and gain
 // math, loop stepping, biquad filter, lo-fi, envelopes, LFO, glide and
 // round-robin selection. Everything must stay finite for hostile inputs.
+#include <Deuterium/GigSampler/Controls.hpp>
 #include <Deuterium/GigSampler/SamplerEngine.hpp>
 
 #include "TestHelpers.hpp"
@@ -394,4 +395,29 @@ TEST_CASE("engine: round_robin", "[deuterium]")
       varied = true;
   }
   REQUIRE(varied);
+}
+
+TEST_CASE("engine: tempo_sync_time_resolution", "[deuterium]")
+{
+  using namespace Deuterium::Gig;
+  // A quarter note (x = 0.25) at 120 BPM is half a second
+  REQUIRE(approxEq(syncTimeToSeconds(0.25f, 120.), 0.5f));
+  // A whole note at 60 BPM is four seconds
+  REQUIRE(approxEq(syncTimeToSeconds(1.f, 60.), 4.f));
+  // Tempo scales linearly
+  REQUIRE(approxEq(syncTimeToSeconds(0.25f, 240.), 0.25f));
+
+  // The time controls are exactly the six timing parameters
+  int n = 0;
+  for(int i = 0; i < ControlCount; i++)
+    n += isTimeControl(i) ? 1 : 0;
+  REQUIRE(n == 6);
+  REQUIRE(isTimeControl(FilterEnvAttack));
+  REQUIRE(isTimeControl(FilterEnvDecay));
+  REQUIRE(isTimeControl(FilterEnvRelease));
+  REQUIRE(isTimeControl(Glide));
+  REQUIRE(isTimeControl(LfoRate));
+  REQUIRE(isTimeControl(LfoDelay));
+  REQUIRE(!isTimeControl(Attack));
+  REQUIRE(!isTimeControl(Cutoff));
 }
