@@ -9,13 +9,20 @@ if(SCORE_STATIC_PLUGINS)
   return()
 endif()
 
-# External CI builds use a static Qt without QtTest: skip the tests there.
-find_package(${QT_VERSION} COMPONENTS Core Test Xml)
-if(NOT TARGET ${QT_PREFIX}::Test OR NOT TARGET ${QT_PREFIX}::Xml)
-  message(STATUS "score-addon-deuterium: QtTest/QtXml not available, skipping tests")
+# The tests are Catch2-based; Catch2 is vendored in score's libossia tree
+# and set up by score's test infrastructure. Skip when unavailable (e.g.
+# external SDK builds).
+if(NOT COMMAND score_setup_catch2)
+  include(ScoreTests OPTIONAL)
+endif()
+if(COMMAND score_setup_catch2)
+  score_setup_catch2()
+endif()
+find_package(${QT_VERSION} COMPONENTS Core Xml)
+if(NOT TARGET Catch2::Catch2WithMain OR NOT TARGET ${QT_PREFIX}::Xml)
+  message(STATUS "score-addon-deuterium: Catch2/QtXml not available, skipping tests")
   return()
 endif()
-set(CMAKE_AUTOMOC ON)
 
 set(DEUTERIUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
@@ -46,7 +53,7 @@ function(add_deuterium_tool TESTNAME TESTSRCS)
   )
   target_link_libraries(${TESTNAME} PRIVATE
     score_lib_base score_plugin_engine score_plugin_media score_plugin_dataflow
-    ${QT_PREFIX}::Test ${QT_PREFIX}::Xml
+    ${QT_PREFIX}::Xml
   )
   foreach(_src ${LIBGIG_SRCS})
     set_source_files_properties(${_src} PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
@@ -55,6 +62,8 @@ endfunction()
 
 function(add_deuterium_test TESTNAME TESTSRCS)
   add_deuterium_tool(${TESTNAME} ${TESTSRCS} ${ARGN})
+  # Catch2 provides main() for the tests; PackTester keeps its own.
+  target_link_libraries(${TESTNAME} PRIVATE Catch2::Catch2WithMain)
   add_test(NAME ${TESTNAME}_target COMMAND ${TESTNAME})
 endfunction()
 
