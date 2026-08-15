@@ -66,6 +66,7 @@ enum SamplerControl : int
   // appends missing trailing controls when loading older documents)
   EnvFromFile,
   Instrument,
+  File,
 
   ControlCount
 };
@@ -228,6 +229,12 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
   // sample data, every other control keeps its value.
   v[Instrument] = new Process::IntSlider{
       0, 127, 0, QStringLiteral("Instrument"), id(Instrument), parent};
+
+  v[File] = new Process::FileChooser{
+      QString{},
+      QStringLiteral("Sample banks (*.gig *.dls *.sf2 *.kmp *.xml *.wav *.flac "
+                     "*.ogg *.aiff *.aif *.mp3)"),
+      QStringLiteral("File"), id(File), parent};
 
   return v;
 }
