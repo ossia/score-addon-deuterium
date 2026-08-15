@@ -41,6 +41,11 @@ public:
   int instrument() const noexcept { return m_instrument; }
   void fileChanged() W_SIGNAL(fileChanged)
 
+  //! Live note trigger from the panel's keyboard / pads widget; routed to
+  //! the execution component which plays it on the next buffer.
+  void uiNoteTriggered(int note, int velocity, bool on)
+      W_SIGNAL(uiNoteTriggered, note, velocity, on)
+
   std::shared_ptr<GigFileInfo> gigInfo() const noexcept { return m_gigInfo; }
 
   std::unique_ptr<Process::Inlet> midi_in;

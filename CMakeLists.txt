@@ -47,6 +47,7 @@ set(HDRS
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Controls.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Executor/Component.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/GigLoader.hpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/KeyboardItem.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Layer.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/SamplerEngine.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessFactory.hpp"

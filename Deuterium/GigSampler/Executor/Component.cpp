@@ -19,6 +19,8 @@
 #include <libremidi/detail/conversion.hpp>
 
 #include <algorithm>
+#include <array>
+#include <bitset>
 #include <cmath>
 
 namespace Deuterium::Gig
@@ -97,6 +99,7 @@ public:
 
     for(auto& v : m_voices)
       stop_voice(v);
+    m_heldKeys.reset();
     m_haveLastPitch = false;
   }
 
@@ -220,11 +223,16 @@ public:
       for(const ossia::timed_value& v : control_ins[i]->data.get_data())
         set_control(i, v.value);
 
-    if(!m_gigInfo)
-      return;
-    if(m_gigInfo->selectedInstrument < 0
+    if(!m_gigInfo || m_gigInfo->selectedInstrument < 0
        || m_gigInfo->selectedInstrument >= std::ssize(m_gigInfo->instruments))
+    {
+      // No playable instrument: nothing may keep sounding or hold a slot
+      for(auto& v : m_voices)
+        if(v.playing)
+          stop_voice(v);
+      m_heldKeys.reset();
       return;
+    }
 
     // One graph cycle can invoke run() once per token request: grow the
     // buffer up to this token's window and never clear what previous tokens
@@ -242,19 +250,57 @@ public:
 
     auto& instr = m_gigInfo->instruments[m_gigInfo->selectedInstrument];
 
+    // Notes triggered from the panel's keyboard / pads widget (queued from
+    // the UI through in_exec, so this vector is only touched on this thread)
+    for(const auto& n : m_uiNotes)
+    {
+      if(n.on && n.velocity > 0)
+        note_on(instr, n.note, n.velocity);
+      else
+        note_off(instr, n.note);
+    }
+    m_uiNotes.clear();
+
+    // Tick boundary: the inlet message list is cleared once per graph tick
+    // while run() executes once per token request. Track the part of the
+    // buffer already consumed so that late-stamped messages (transport
+    // discontinuities stamp note-offs at 0, other tokens' windows) are
+    // handled exactly once instead of silently dropped - every dropped
+    // note-off is a stuck note.
+    if(m_st.samples_since_start != m_lastTick)
+    {
+      m_lastTick = m_st.samples_since_start;
+      m_midiConsumedUntil = 0;
+    }
+    const int64_t windowEnd = timings.start_sample + timings.length;
+
+    m_midiScratch.clear();
     for(auto& mess : this->midi_in->data.messages)
     {
-      // Inlet data persists across the run() calls of one cycle: only
-      // consume the messages stamped inside this token's window
       const auto ts = (int64_t)mess.timestamp;
-      if(ts < timings.start_sample || ts >= timings.start_sample + timings.length)
-        continue;
+      if(ts < m_midiConsumedUntil)
+        continue; // already handled by an earlier token this tick
+      if(timings.length > 0 && ts >= windowEnd)
+        continue; // left for a later token this tick
 
       uint8_t data[4];
       int n = cmidi2_convert_single_ump_to_midi1((uint8_t*)data, 3, mess.data);
       if(n != 3)
         continue;
+      m_midiScratch.push_back({ts, {data[0], data[1], data[2]}});
+    }
+    m_midiConsumedUntil = std::max(m_midiConsumedUntil, windowEnd);
+    // Sources append their messages unmerged: order by time so that a
+    // note-off cannot overtake the note-on it belongs to
+    std::stable_sort(
+        m_midiScratch.begin(), m_midiScratch.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
 
+    // In a zero-length window (paused / speed 0) only releases go through:
+    // a voice started now would neither be heard nor ever advanced
+    const bool paused = timings.length == 0;
+    for(const auto& [ts, data] : m_midiScratch)
+    {
       libremidi::message m{{data[0], data[1], data[2]}};
       const int note = data[1];
       const int velocity = data[2];
@@ -264,7 +310,8 @@ public:
         case libremidi::message_type::NOTE_ON: {
           if(velocity == 0)
             goto note_off;
-          note_on(instr, note, velocity);
+          if(!paused)
+            note_on(instr, note, velocity);
           break;
         }
         note_off:
@@ -273,8 +320,31 @@ public:
           break;
         }
         case libremidi::message_type::PITCH_BEND: {
-          const int v14 = data[1] | (data[2] << 7);
-          m_bend = (v14 - 8192) / 8192.0;
+          if(!paused)
+          {
+            const int v14 = data[1] | (data[2] << 7);
+            m_bend = (v14 - 8192) / 8192.0;
+          }
+          break;
+        }
+        case libremidi::message_type::CONTROL_CHANGE: {
+          switch(data[1])
+          {
+            case 120: // All Sound Off
+              for(auto& v : m_voices)
+                stop_voice(v);
+              m_heldKeys.reset();
+              break;
+            case 121: // Reset All Controllers
+              m_bend = 0.;
+              break;
+            case 123: // All Notes Off
+              all_notes_off();
+              m_heldKeys.reset();
+              break;
+            default:
+              break;
+          }
           break;
         }
         default:
@@ -295,11 +365,17 @@ public:
 
       auto& region = *voice.region;
       if(!region.sample.data)
+      {
+        stop_voice(voice);
         continue;
+      }
       auto& sampleData = *region.sample.data;
       const int channels = sampleData.size();
       if(channels == 0)
+      {
+        stop_voice(voice);
         continue;
+      }
 
       // SF2 endAddrsOffset trims trailing frames off the playable range
       int64_t totalFrames = std::ssize(sampleData[0]);
@@ -477,8 +553,33 @@ public:
   }
 
 private:
+public:
+  struct UiNote
+  {
+    uint8_t note{}, velocity{};
+    bool on{};
+  };
+  // MIDI keys physically held (per played note number): gates the
+  // release-trigger scan so stray or duplicate note-offs cannot fire it
+  std::bitset<128> m_heldKeys;
+  // run() executes once per token request but the inlet message list is
+  // cleared once per graph tick: track the consumed part of the buffer
+  int64_t m_lastTick{-1};
+  int64_t m_midiConsumedUntil{};
+  std::vector<std::pair<int64_t, std::array<uint8_t, 3>>> m_midiScratch;
+  std::vector<UiNote> m_uiNotes; // execution-thread only
+  void queue_ui_note(int note, int velocity, bool on)
+  {
+    m_uiNotes.push_back(
+        {(uint8_t)std::clamp(note, 0, 127), (uint8_t)std::clamp(velocity, 0, 127),
+         on});
+  }
+
+private:
+
   void note_on(GigInstrument& instr, int note, int velocity) noexcept
   {
+    m_heldKeys.set(note & 127);
     const auto& p = m_params;
     m_noteVelocity[note & 127] = (uint8_t)velocity;
 
@@ -624,6 +725,8 @@ private:
 
   void note_off(GigInstrument& instr, int note) noexcept
   {
+    const bool wasHeld = m_heldKeys.test(note & 127);
+    m_heldKeys.reset(note & 127);
     for(auto& voice : m_voices)
     {
       if(!voice.playing || voice.released)
@@ -631,13 +734,23 @@ private:
       if(voice.note != note)
         continue;
       if(voice.oneShotEff)
+      {
+        // One-shots ignore note-off for the envelope, but a loop-until-
+        // release sample must still be allowed to run to its end
+        if(voice.loop.mode == 3)
+          voice.released = true;
         continue;
+      }
 
       voice.amp_adsr.startRelease();
       voice.filterEnv.release();
       voice.fileModEnv.release();
       voice.released = true;
     }
+    // Stray or duplicate note-offs (dropped note-on, reload, controllers
+    // sending both vel-0 and note-off) must not fire release triggers
+    if(!wasHeld)
+      return;
 
     // Release triggers: dedicated regions fired on note-off (gig)
     const int velocity = m_noteVelocity[note & 127];
@@ -750,6 +863,13 @@ private:
     }
 
     voice.loop = resolveLoop(region, p, frames);
+    // A one-shot voice ignores note-off: an infinite loop would make it
+    // immortal (loop-until-release stays valid, note-off lets it run out).
+    // A release-trigger voice never gets any note-off at all.
+    if(voice.oneShotEff && (voice.loop.mode == 1 || voice.loop.mode == 2))
+      voice.loop.mode = 0;
+    if(fromRelease)
+      voice.loop.mode = 0;
 
     // Gain: velocity curve, zone crossfade, region attenuation
     voice.gain = region.sampleAttenuation * velocityGain(region, p, effVel)
@@ -948,6 +1068,12 @@ Component::Component(
   // values (including graph modulation) back onto the inlets so the UI
   // widgets can display them.
   std::weak_ptr<gigsampler_node> weak_node = node;
+  connect(
+      &proc, &Deuterium::Gig::ProcessModel::uiNoteTriggered, this,
+      [this, weak_node](int note, int velocity, bool on) {
+    if(auto node = weak_node.lock())
+      in_exec([node, note, velocity, on] { node->queue_ui_note(note, velocity, on); });
+  });
   con(ctx.doc.coarseUpdateTimer, &QTimer::timeout, this,
       [weak_node, proc = QPointer<Deuterium::Gig::ProcessModel>{&proc}] {
     auto node = weak_node.lock();
