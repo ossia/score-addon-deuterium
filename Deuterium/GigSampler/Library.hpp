@@ -25,30 +25,20 @@ class LibraryHandler final
             "wav", "flac", "ogg", "aiff", "aif", "mp3"};
   }
 
-  Library::Subcategories categories;
-  ossia::hash_map<QString, Library::ProcessNode*> formatNodes;
-  ossia::hash_map<QString, Library::ProcessNode*> folderNodes;
+  Library::CategoryPaths categories;
 
   void setup(Library::ProcessesItemModel& model, const score::GUIApplicationContext& ctx)
       override
   {
-    // A rescan rebuilds the whole node tree: the cached raw pointers of the
-    // previous scan would dangle
-    formatNodes.clear();
-    folderNodes.clear();
-
-    const auto& key = Metadata<ConcreteKey_k, Deuterium::Gig::ProcessModel>::get();
-    QModelIndex node = model.find(key);
-    if(node == QModelIndex{})
-      return;
-
     categories.init(
-        Metadata<PrettyName_k, Deuterium::Gig::ProcessModel>::get().toStdString(), node,
-        ctx);
-
+        Metadata<PrettyName_k, Deuterium::Gig::ProcessModel>::get().toStdString(), ctx);
   }
 
-  std::function<void()> asyncAddPath(std::string_view path) override
+  // Worker thread: pure scan. Two category levels: file format first
+  // ("GIG", "SF2", ...), then the file's parent folder; multi-instrument
+  // files carry one staged child per instrument (the file entry itself
+  // plays instrument 0).
+  std::optional<Library::ProcessEntry> scanPath(std::string_view path) override
   {
     score::PathInfo file{path};
 
@@ -58,7 +48,7 @@ class LibraryHandler final
         = QString::fromUtf8(file.fileName.data(), file.fileName.size());
     if(fileName.endsWith(QStringLiteral(".xml"), Qt::CaseInsensitive)
        && fileName.compare(QStringLiteral("drumkit.xml"), Qt::CaseInsensitive) != 0)
-      return {};
+      return std::nullopt;
 
     Library::ProcessData pdata;
     pdata.prettyName
@@ -67,100 +57,70 @@ class LibraryHandler final
     pdata.customData
         = QString::fromUtf8(file.absoluteFilePath.data(), file.absoluteFilePath.size());
 
-    // We are on a worker thread: enumerating the file's instruments (no
-    // sample data is read) is fine here, but the model may only be touched
-    // from the returned continuation, which runs on the GUI thread.
+    // Enumerating the file's instruments reads no sample data.
     auto instruments = listInstruments(pdata.customData);
 
     // Unparseable files and instrument-less containers (e.g. GigaPulse
     // impulse-response shells) cannot be played: keep them out of the library
     if(instruments.empty())
-      return {};
+      return std::nullopt;
 
-    auto format = formatName(pdata.customData);
+    const auto format = formatName(pdata.customData);
 
     // Drumkits are named after their folder, not the generic "drumkit.xml"
     if(format == QStringLiteral("Drumkit") && !instruments[0].empty())
       pdata.prettyName = QString::fromStdString(instruments[0]);
 
-    return [this, p = std::string(path), pdata = std::move(pdata),
-            format = std::move(format),
-            instruments = std::move(instruments)]() mutable {
-      score::PathInfo file{p};
-      const auto key = pdata.key;
-      const auto filePath = pdata.customData;
+    Library::ProcessEntry e;
+    e.rootKey = pdata.key;
+    e.categoryPath = categoryPath(file, format, fileName);
 
-      auto& fileNode = addToCategory(file, format, std::move(pdata));
-
-      // Multi-instrument files additionally expose one child per instrument
-      // (the file entry itself plays instrument 0)
-      if(instruments.size() > 1)
+    e.node.data = std::move(pdata);
+    if(instruments.size() > 1)
+    {
+      const auto& filePath = e.node.data.customData;
+      for(std::size_t i = 0; i < instruments.size(); i++)
       {
-        for(std::size_t i = 0; i < instruments.size(); i++)
-        {
-          Library::ProcessData child;
-          child.key = key;
-          child.prettyName = instruments[i].empty()
-                                 ? QStringLiteral("Instrument %1").arg(i)
-                                 : QString::fromStdString(instruments[i]);
-          child.customData = filePath + '|' + QString::number(i);
-          Library::addToLibrary(fileNode, std::move(child));
-        }
+        Library::ProcessData child;
+        child.key = e.rootKey;
+        child.prettyName = instruments[i].empty()
+                               ? QStringLiteral("Instrument %1").arg(i)
+                               : QString::fromStdString(instruments[i]);
+        child.customData = filePath + '|' + QString::number(i);
+        e.node.children.push_back(Library::StagedNode{std::move(child), {}});
       }
-    };
+    }
+    return e;
   }
 
-  // Two category levels: file format first ("GIG", "SF2", ...), then the
-  // file's parent folder, as Library::Subcategories does. Returns the file's
-  // node so that instrument children can be attached to it.
-  Library::ProcessNode& addToCategory(
+  QStringList categoryPath(
       const score::PathInfo& file, const QString& format,
-      Library::ProcessData&& pdata)
+      const QString& fileName) const noexcept
   {
-    SCORE_ASSERT(categories.parent);
-
-    Library::ProcessNode* fmtNode{};
-    if(auto it = formatNodes.find(format); it != formatNodes.end())
-    {
-      fmtNode = it->second;
-    }
-    else
-    {
-      fmtNode = &Library::addToLibrary(
-          *categories.parent, Library::ProcessData{{{}, format, {}}, {}});
-      formatNodes[format] = fmtNode;
-    }
-
-    auto parentFolder
-        = QString::fromUtf8(file.parentDirName.data(), file.parentDirName.size());
+    const auto paths = categories.get();
+    if(!paths)
+      return {format};
 
     // Files at the root of the library (or of a preset folder) go directly
     // under the format node
-    if(file.absolutePath == categories.libraryFolderPath
-       || file.absolutePath.ends_with(categories.defaultPresetsPath))
-      return Library::addToLibrary(*fmtNode, std::move(pdata));
+    if(file.absolutePath == paths->packagesRoot
+       || file.absolutePath.ends_with(paths->presets))
+      return {format};
 
     // Hydrogen kits are one-per-folder with a fixed file name: their parent
     // folder is the kit itself, so group by the folder above it instead
-    const auto fn = QString::fromUtf8(file.fileName.data(), file.fileName.size());
-    if(fn.compare(QStringLiteral("drumkit.xml"), Qt::CaseInsensitive) == 0)
+    if(fileName.compare(QStringLiteral("drumkit.xml"), Qt::CaseInsensitive) == 0)
     {
       score::PathInfo parent{file.absolutePath};
-      parentFolder = QString::fromUtf8(
-          parent.parentDirName.data(), parent.parentDirName.size());
-      if(parent.absolutePath == categories.libraryFolderPath)
-        return Library::addToLibrary(*fmtNode, std::move(pdata));
+      if(parent.absolutePath == paths->packagesRoot)
+        return {format};
+      return {format,
+              QString::fromUtf8(
+                  parent.parentDirName.data(), parent.parentDirName.size())};
     }
 
-    const QString folderKey = format + QLatin1Char('/') + parentFolder;
-    if(auto it = folderNodes.find(folderKey); it != folderNodes.end())
-      return Library::addToLibrary(*it->second, std::move(pdata));
-
-    auto& category = Library::addToLibrary(
-        *fmtNode, Library::ProcessData{{{}, parentFolder, {}}, {}});
-    auto& node = Library::addToLibrary(category, std::move(pdata));
-    folderNodes[folderKey] = &category;
-    return node;
+    return {format,
+            QString::fromUtf8(file.parentDirName.data(), file.parentDirName.size())};
   }
 };
 
