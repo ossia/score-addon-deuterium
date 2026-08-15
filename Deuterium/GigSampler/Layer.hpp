@@ -92,8 +92,20 @@ struct UiBuilder final : Process::LayoutBuilderBase
       w = WidgetFactory::FloatKnob::make_item(range, *ctl, doc, cell, &context);
     if(!w)
     {
-      delete cell;
-      return control(parent, samplerControl);
+      // Non-float control: wrap its standard port item in a same-height cell,
+      // top-aligned, so the labels of a grid row all sit on the same line.
+      auto item = makePort(*ctl);
+      if(!item.container)
+      {
+        delete cell;
+        return;
+      }
+      const auto br = item.container->boundingRect();
+      const double cw = std::max(cell_w, br.width() + 8.);
+      cell->setRect({0., 0., cw, cell_h});
+      item.container->setParentItem(cell);
+      item.container->setPos(std::max(0., (cw - br.width()) / 2.), 0.);
+      return;
     }
     w->setParentItem(cell);
     w->setPos((cell_w - 35.) / 2., 14.);
@@ -196,11 +208,18 @@ private:
              m_model.inlets()[1 + Gig::Instrument]))
       {
         auto* cell = new score::EmptyRectItem{header};
+        auto* lab = b.makeLabel("Instrument");
+        lab->setParentItem(cell);
+        lab->setPos(10., 0.);
         m_instruments = new score::QGraphicsCombo{instrumentNames(), cell};
+        m_instruments->setPos(10., 12.);
         const int idx = m_model.instrument();
         if(idx >= 0 && idx < m_instruments->array.size())
           m_instruments->setValue(idx);
-        cell->setRect(m_instruments->boundingRect());
+        const auto cr = m_instruments->boundingRect();
+        cell->setRect(
+            {0., 0., 10. + std::max(cr.width(), lab->boundingRect().width()),
+             12. + cr.height()});
 
         connect(
             m_instruments, &score::QGraphicsCombo::sliderMoved, this, [this, ctl] {
@@ -217,7 +236,7 @@ private:
         });
         if(auto* pf = b.portFactory.get(ctl->concreteKey()))
           if(auto* dot = pf->makePortItem(*ctl, m_ctx, cell, this))
-            dot->setPos(0., 4.);
+            dot->setPos(0., 2.);
       }
     }
 
