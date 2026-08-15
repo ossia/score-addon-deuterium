@@ -74,6 +74,26 @@ void ProcessModel::wireInstrumentControl()
     else
       fileChanged();
   });
+
+  const int fidx = 1 + Gig::File;
+  if(fidx >= std::ssize(m_inlets))
+    return;
+  auto* fctl = qobject_cast<Process::ControlInlet*>(m_inlets[fidx]);
+  if(!fctl)
+    return;
+
+  if(ossia::convert<std::string>(fctl->value()) != m_filePath.toStdString())
+    fctl->setValue(m_filePath.toStdString());
+
+  connect(
+      fctl, &Process::ControlInlet::valueChanged, this, [this](const ossia::value& v) {
+    const auto path = QString::fromStdString(ossia::convert<std::string>(v));
+    if(path == m_filePath)
+      return;
+    // Keep the instrument index: swapping between similar banks keeps the
+    // whole setup; out-of-range indices play silently until changed.
+    loadFile(path, m_instrument);
+  });
 }
 
 ProcessModel::~ProcessModel()
@@ -106,12 +126,16 @@ void ProcessModel::loadFile(const QString& path, int instrument)
   m_instrument = instrument;
   m_gigInfo.reset();
 
-  // Keep the Instrument inlet in sync (its change handler no-ops when the
-  // value already matches)
+  // Keep the Instrument and File inlets in sync (their change handlers
+  // no-op when the value already matches)
   if(const int idx = 1 + Gig::Instrument; idx < std::ssize(m_inlets))
     if(auto* ctl = qobject_cast<Process::ControlInlet*>(m_inlets[idx]))
       if(ossia::convert<int>(ctl->value()) != instrument)
         ctl->setValue(instrument);
+  if(const int idx = 1 + Gig::File; idx < std::ssize(m_inlets))
+    if(auto* ctl = qobject_cast<Process::ControlInlet*>(m_inlets[idx]))
+      if(ossia::convert<std::string>(ctl->value()) != path.toStdString())
+        ctl->setValue(path.toStdString());
 
   if(!path.isEmpty())
   {

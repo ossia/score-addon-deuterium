@@ -7,14 +7,19 @@
 #include <Process/Dataflow/ControlWidgets.hpp>
 #include <Process/Dataflow/PortFactory.hpp>
 #include <Process/Dataflow/PortItem.hpp>
+#include <Process/Dataflow/PortType.hpp>
 #include <Process/ProcessFactory.hpp>
 
 #include <Control/Layout.hpp>
 #include <Effect/EffectFactory.hpp>
 
+#include <Process/Commands/SetControlValue.hpp>
+
+#include <score/command/Dispatchers/CommandDispatcher.hpp>
 #include <score/graphics/TextItem.hpp>
 #include <score/graphics/layouts/GraphicsBoxLayout.hpp>
 #include <score/graphics/layouts/GraphicsTabLayout.hpp>
+#include <score/graphics/widgets/QGraphicsCombo.hpp>
 
 #include <QFileInfo>
 
@@ -121,8 +126,10 @@ public:
       , m_model{model}
       , m_ctx{ctx}
   {
-    rebuild();
-    connect(&model, &ProcessModel::fileChanged, this, [this] { rebuild(); });
+    build();
+    // The user may be interacting with one of the widgets when a load
+    // finishes: never tear the tree down at runtime, update it in place.
+    connect(&model, &ProcessModel::fileChanged, this, [this] { refresh(); });
   }
 
 private:
@@ -146,14 +153,35 @@ private:
     return t;
   }
 
-  void rebuild()
+  void refresh()
   {
-    // The layouts are one-shot (the tab layout in particular): build the
-    // whole tree from scratch.
-    const auto items = childItems();
-    for(auto* item : items)
-      delete item;
+    if(m_title)
+      m_title->setText(title());
+    if(m_instruments)
+    {
+      m_instruments->array = instrumentNames();
+      const int idx = m_model.instrument();
+      if(idx >= 0 && idx < m_instruments->array.size())
+        m_instruments->setValue(idx);
+    }
+  }
 
+  QStringList instrumentNames() const
+  {
+    QStringList l;
+    if(auto gi = m_model.gigInfo())
+      for(std::size_t i = 0; i < gi->instruments.size(); i++)
+        l.push_back(
+            gi->instruments[i].name.empty()
+                ? QStringLiteral("Instrument %1").arg(i)
+                : QString::fromStdString(gi->instruments[i].name));
+    if(l.empty())
+      l.push_back(QStringLiteral("-"));
+    return l;
+  }
+
+  void build()
+  {
     UiBuilder b{
         *this,
         m_model,
@@ -173,9 +201,40 @@ private:
         if(midi.container)
           midi.container->setParentItem(header);
       }
-      auto* t = b.makeLabel(title().toStdString());
-      t->setParentItem(header);
-      b.control(header, Gig::Instrument);
+      b.control(header, Gig::File);
+
+      // Instrument chooser: a combo listing the file's instruments, driving
+      // the Instrument inlet (refreshed in place on load)
+      if(auto* ctl = qobject_cast<Process::ControlInlet*>(
+             m_model.inlets()[1 + Gig::Instrument]))
+      {
+        auto* cell = new score::EmptyRectItem{header};
+        m_instruments = new score::QGraphicsCombo{instrumentNames(), cell};
+        const int idx = m_model.instrument();
+        if(idx >= 0 && idx < m_instruments->array.size())
+          m_instruments->setValue(idx);
+        cell->setRect(m_instruments->boundingRect());
+
+        connect(
+            m_instruments, &score::QGraphicsCombo::sliderMoved, this, [this, ctl] {
+          m_instruments->moving = true;
+          m_ctx.dispatcher.submit<Process::SetControlValue>(
+              *ctl, m_instruments->value());
+        });
+        connect(
+            m_instruments, &score::QGraphicsCombo::sliderReleased, this, [this, ctl] {
+          m_ctx.dispatcher.submit<Process::SetControlValue>(
+              *ctl, m_instruments->value());
+          m_ctx.dispatcher.commit();
+          m_instruments->moving = false;
+        });
+        if(auto* pf = b.portFactory.get(ctl->concreteKey()))
+          if(auto* dot = pf->makePortItem(*ctl, m_ctx, cell, this))
+            dot->setPos(0., 4.);
+      }
+
+      m_title = new score::SimpleTextItem{Process::labelBrush().main, header};
+      m_title->setText(title());
     }
 
     auto* tabs = b.start<score::GraphicsTabLayout>(main, 3.);
@@ -219,6 +278,8 @@ private:
 
   const ProcessModel& m_model;
   const Process::Context& m_ctx;
+  score::SimpleTextItem* m_title{};
+  score::QGraphicsCombo* m_instruments{};
 };
 
 class LayerFactory final : public Process::EffectLayerFactory_Base
