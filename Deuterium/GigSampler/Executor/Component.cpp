@@ -63,6 +63,16 @@ public:
       : m_st{st}
   {
     this->m_inlets.push_back(midi_in = new ossia::midi_inlet);
+    // One value inlet per control, in SamplerControl order right after the
+    // MIDI inlet: score binds the process inlets to these by index, which is
+    // what makes the controls modulatable from the execution graph (LFOs,
+    // automations, cables) and not only from the UI.
+    for(int i = 0; i < ControlCount; i++)
+    {
+      auto inlet = new ossia::value_inlet;
+      control_ins[i] = inlet;
+      this->m_inlets.push_back(inlet);
+    }
     this->m_outlets.push_back(audio_out = new ossia::audio_outlet);
     m_voices.resize(max_voices);
   }
@@ -104,6 +114,13 @@ public:
 
   void run(const ossia::token_request& tk, ossia::exec_state_facade estate) noexcept override
   {
+    // Values arriving through the graph (cables, LFOs, automation) land in
+    // the control ports; apply them before rendering. UI edits reach
+    // m_params directly through set_control().
+    for(int i = 0; i < ControlCount; i++)
+      for(const ossia::timed_value& v : control_ins[i]->data.get_data())
+        applySamplerControl(m_params, i, v.value);
+
     if(!m_gigInfo)
       return;
     if(m_gigInfo->selectedInstrument < 0
@@ -324,6 +341,20 @@ private:
     m_noteVelocity[note & 127] = (uint8_t)velocity;
 
     const int regionCount = std::min<int>(instr.regions.size(), max_regions);
+
+    // A key with no mapped region is a no-op: in particular it must not
+    // choke the held mono/legato note
+    {
+      bool anyMatch = false;
+      for(int i = 0; i < regionCount && !anyMatch; i++)
+      {
+        auto& region = instr.regions[i];
+        anyMatch = !region.muted && !region.releaseTrigger
+                   && regionMatches(region, note, velocity);
+      }
+      if(!anyMatch)
+        return;
+    }
 
     // 1. chokes: any group this hit triggers cuts what currently sounds in it
     for(int i = 0; i < regionCount; i++)
@@ -634,6 +665,7 @@ public:
   ossia::execution_state& m_st;
   std::shared_ptr<GigFileInfo> m_gigInfo;
   ossia::midi_inlet* midi_in{};
+  ossia::value_inlet* control_ins[ControlCount]{};
   ossia::audio_outlet* audio_out{};
   std::vector<gig_voice> m_voices;
   SamplerParams m_params;

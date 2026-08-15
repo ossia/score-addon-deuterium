@@ -222,8 +222,8 @@ void convertRawSampleData(
         out.loopStart = (uint32_t)(out.loopStart * ratio);
         out.loopEnd = (uint32_t)(out.loopEnd * ratio);
       }
+      out.sampleRate = targetRate;
     }
-    out.sampleRate = targetRate;
   }
 
   // Clamp loop points to the decoded frame count: files can declare

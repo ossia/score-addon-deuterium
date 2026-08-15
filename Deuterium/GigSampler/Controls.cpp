@@ -59,14 +59,26 @@ void applySamplerControl(SamplerParams& p, int control, const ossia::value& val)
     case FilterEnvAmount:
       flt(p.filterEnvAmount, -1.f, 1.f);
       break;
+    case FilterEnvAttack:
+      flt(p.filterEnvAttack, 0.001f, 60.f);
+      break;
     case FilterEnvDecay:
       flt(p.filterEnvDecay, 0.001f, 60.f);
+      break;
+    case FilterEnvSustain:
+      flt(p.filterEnvSustain, 0.f, 1.f);
+      break;
+    case FilterEnvRelease:
+      flt(p.filterEnvRelease, 0.001f, 60.f);
       break;
     case VelToCutoff:
       flt(p.velToCutoff, 0.f, 1.f);
       break;
     case VelAmount:
       flt(p.velAmount, 0.f, 1.f);
+      break;
+    case VelCurve:
+      num(p.velCurve, 0, 2);
       break;
     case VelToStart:
       flt(p.velToStart, 0.f, 1.f);
