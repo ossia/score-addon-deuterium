@@ -4,6 +4,17 @@ cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
 # tree): score's cmake dir is on CMAKE_MODULE_PATH and provides the setup
 # functions used below.
 if(NOT TARGET score_lib_base)
+  # Workaround for a static-Qt packaging gap in some ossia SDK builds: the
+  # EglFS KMS plugin's cmake config references private support targets that
+  # the SDK does not ship, which breaks find_package(Qt6 Widgets) at
+  # configure time. Pre-creating them as empty interfaces satisfies the
+  # link-interface check; we never load that platform plugin.
+  foreach(_qt_egl_tgt Qt6::EglFsKmsGbmSupportPrivate Qt6::EglFsKmsSupportPrivate)
+    if(NOT TARGET ${_qt_egl_tgt})
+      add_library(${_qt_egl_tgt} INTERFACE IMPORTED)
+    endif()
+  endforeach()
+
   include(ScoreExternalAddon)
 endif()
 
