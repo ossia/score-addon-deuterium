@@ -1,8 +1,17 @@
-project(score_addon_deuterium LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.24 FATAL_ERROR)
+
+# Standalone configuration (CI addon builds against a score source or SDK
+# tree): score's cmake dir is on CMAKE_MODULE_PATH and provides the setup
+# functions used below.
+if(NOT TARGET score_lib_base)
+  include(ScoreExternalAddon)
+endif()
 
 if(NOT TARGET score_plugin_engine)
   return()
 endif()
+
+project(score_addon_deuterium LANGUAGES CXX)
 
 score_common_setup()
 
@@ -132,4 +141,8 @@ target_link_libraries(
 
 setup_score_plugin(${PROJECT_NAME})
 
-setup_score_tests(Tests)
+# In-tree builds only: external addon builds have neither the test
+# helpers nor the score test fixtures.
+if(COMMAND setup_score_tests)
+  setup_score_tests(Tests)
+endif()
