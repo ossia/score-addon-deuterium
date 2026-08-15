@@ -371,6 +371,42 @@ void convertAndPrune(
 // GigaStudio / Gigasampler
 /////////////////////////////
 
+// True when this dimension region sits in a non-default zone of a selector
+// dimension we do not model (keyswitch, mod wheel, sustain pedal,
+// aftertouch, smart MIDI, ...): only the zone the selector rests in (zone 0)
+// plays, otherwise every keyswitched articulation would stack on top of each
+// other. Layers and sample channels stack by design; velocity, round-robin,
+// random and release-trigger zones are modelled properly.
+// Used by both the metadata and the raw-buffer walk, which must stay in
+// lockstep.
+bool gigZoneIsUnselected(const gig::Region* rgn, uint32_t d)
+{
+  int bitsBelow = 0;
+  for(unsigned int dim = 0; dim < rgn->Dimensions;
+      bitsBelow += rgn->pDimensionDefinitions[dim].bits, dim++)
+  {
+    switch(rgn->pDimensionDefinitions[dim].dimension)
+    {
+      case gig::dimension_velocity:
+      case gig::dimension_roundrobin:
+      case gig::dimension_roundrobinkeyboard:
+      case gig::dimension_random:
+      case gig::dimension_releasetrigger:
+      case gig::dimension_layer:
+      case gig::dimension_samplechannel:
+        break;
+      default:
+      {
+        const int mask = (1 << rgn->pDimensionDefinitions[dim].bits) - 1;
+        if(((d >> bitsBelow) & mask) != 0)
+          return true;
+        break;
+      }
+    }
+  }
+  return false;
+}
+
 std::shared_ptr<GigFileInfo>
 loadMetadata_gig(const QString& filePath, int instrumentIndex)
 {
@@ -432,6 +468,9 @@ loadMetadata_gig(const QString& filePath, int instrumentIndex)
       region.keyHigh = rgn->KeyRange.high;
       region.velLow = 0;
       region.velHigh = 127;
+
+      if(gigZoneIsUnselected(rgn, d))
+        continue;
 
       // Decode the dimension zones this region sits in: velocity range,
       // round-robin/random alternation and release triggers
@@ -506,9 +545,15 @@ loadMetadata_gig(const QString& filePath, int instrumentIndex)
       region.eg1Sustain = dimRgn->EG1Sustain / 1000.0; // 0-1000 -> 0.0-1.0
       region.eg1Release = dimRgn->EG1Release;
 
-      // Filter
+      // Filter. When the cutoff is bound to a MIDI controller, the stored
+      // byte is only the controller's fallback value (often 0): without
+      // live controller input, play fully open instead of nearly silent.
       region.vcfEnabled = dimRgn->VCFEnabled;
-      region.vcfCutoff = dimRgn->VCFCutoff;
+      const auto cutCtl = dimRgn->VCFCutoffController;
+      if(cutCtl != gig::vcf_cutoff_ctrl_none && cutCtl != gig::vcf_cutoff_ctrl_none2)
+        region.vcfCutoff = 127;
+      else
+        region.vcfCutoff = dimRgn->VCFCutoff;
       region.vcfResonance = dimRgn->VCFResonance;
 
       // Playback
@@ -579,6 +624,9 @@ bool collectRawBuffers_gig(
 
       auto* smp = dimRgn->pSample;
       if(smp->SamplesTotal == 0)
+        continue;
+
+      if(gigZoneIsUnselected(rgn, d))
         continue;
 
       if(regionIdx >= (int)destInstr.regions.size())
