@@ -26,6 +26,7 @@
 
 #include <Deuterium/GigSampler/Controls.hpp>
 #include <Deuterium/GigSampler/GigLoader.hpp>
+#include <Deuterium/GigSampler/KeyboardItem.hpp>
 #include <Deuterium/GigSampler/ProcessModel.hpp>
 
 namespace Deuterium::Gig
@@ -161,6 +162,33 @@ private:
       if(idx >= 0 && idx < m_instruments->array.size())
         m_instruments->setValue(idx);
     }
+    updateKeyboard();
+  }
+
+  void updateKeyboard()
+  {
+    if(!m_keyboard)
+      return;
+    std::bitset<128> mapped;
+    int singleKey = 0, total = 0;
+    if(auto gi = m_model.gigInfo())
+    {
+      if(gi->selectedInstrument >= 0
+         && gi->selectedInstrument < std::ssize(gi->instruments))
+      {
+        for(const auto& r : gi->instruments[gi->selectedInstrument].regions)
+        {
+          if(r.releaseTrigger || r.muted)
+            continue;
+          for(int k = r.keyLow; k <= (int)r.keyHigh && k < 128; k++)
+            mapped.set(k);
+          total++;
+          singleKey += r.keyLow == r.keyHigh;
+        }
+      }
+    }
+    // Kits map one note per region: default to pads there
+    m_keyboard->setMapped(mapped, total > 0 && singleKey * 2 > total);
   }
 
   QStringList instrumentNames() const
@@ -287,6 +315,17 @@ private:
       b.grid(page, 4, {VoiceMode, Glide, Polyphony});
     }
 
+    // Trigger strip: compact keyboard / pads showing the mapped notes;
+    // clicks play through the running execution, click height = velocity
+    m_keyboard = new KeyboardItem{main};
+    m_keyboard->noteOn = [this](int note, int velocity) {
+      const_cast<ProcessModel&>(m_model).uiNoteTriggered(note, velocity, true);
+    };
+    m_keyboard->noteOff = [this](int note) {
+      const_cast<ProcessModel&>(m_model).uiNoteTriggered(note, 0, false);
+    };
+    updateKeyboard();
+
     b.finalizeLayout(this);
     fitChildrenRect();
   }
@@ -294,6 +333,7 @@ private:
   const ProcessModel& m_model;
   const Process::Context& m_ctx;
   score::QGraphicsCombo* m_instruments{};
+  KeyboardItem* m_keyboard{};
 };
 
 class LayerFactory final : public Process::EffectLayerFactory_Base
@@ -312,7 +352,7 @@ private:
     return p == Metadata<ConcreteKey_k, ProcessModel>::get();
   }
 
-  std::optional<double> recommendedHeight() const noexcept override { return 220.; }
+  std::optional<double> recommendedHeight() const noexcept override { return 270.; }
 
   score::ResizeableItem* makeItem(
       const Process::ProcessModel& proc, const Process::Context& ctx,
