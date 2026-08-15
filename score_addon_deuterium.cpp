@@ -12,6 +12,7 @@
 #include <score/tools/std/HashMap.hpp>
 
 #include <Deuterium/GigSampler/Executor/Component.hpp>
+#include <Deuterium/GigSampler/Layer.hpp>
 #include <Deuterium/GigSampler/Library.hpp>
 #include <Deuterium/GigSampler/ProcessFactory.hpp>
 
@@ -27,6 +28,7 @@ std::vector<score::InterfaceBase*> score_addon_deuterium::factories(
   return instantiate_factories<
       score::ApplicationContext,
       FW<Process::ProcessModelFactory, Deuterium::Gig::ProcessFactory>,
+      FW<Process::LayerFactory, Deuterium::Gig::LayerFactory>,
       FW<Library::LibraryInterface, Deuterium::Gig::LibraryHandler>,
       FW<Process::ProcessDropHandler, Deuterium::Gig::DropHandler>,
       FW<Execution::ProcessComponentFactory, Deuterium::Gig::Executor::ComponentFactory>>(
