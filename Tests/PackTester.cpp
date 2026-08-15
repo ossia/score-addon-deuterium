@@ -31,7 +31,8 @@ enum ExitCode
 {
   Ok = 0,
   Unloadable = 2,  // metadata parse returned null
-  LoadFailed = 3   // metadata ok but sample loading returned null
+  LoadFailed = 3,  // metadata ok but sample loading returned null
+  EmptyLoad = 4    // loaded "successfully" but no region has sample data
 };
 
 int testSingleFile(const QString& path, bool metadataOnly)
@@ -57,6 +58,8 @@ int testSingleFile(const QString& path, bool metadataOnly)
       auto loaded = loadGigFileSamples(m, 48000, {});
       if(!loaded)
         return LoadFailed;
+      if(loaded->instruments[loaded->selectedInstrument].regions.empty())
+        return EmptyLoad;
     }
   }
   return Ok;
@@ -82,7 +85,9 @@ const char* statusString(const Result& r)
     case Result::Passed:
       return "PASS ";
     case Result::Failed:
-      return r.exitCode == Unloadable ? "NOLOAD" : "NOSMP";
+      return r.exitCode == Unloadable  ? "NOLOAD"
+             : r.exitCode == EmptyLoad ? "EMPTY"
+                                       : "NOSMP";
     case Result::Crashed:
       return "CRASH";
     case Result::TimedOut:

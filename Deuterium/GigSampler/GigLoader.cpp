@@ -3,7 +3,9 @@
 #include <Media/AudioDecoder.hpp>
 
 #include <QDir>
+#include <QDirIterator>
 #include <QDomDocument>
+#include <QHash>
 #include <QFile>
 #include <QFileInfo>
 
@@ -103,6 +105,7 @@ struct RawSampleBuffer
   std::vector<uint8_t> data;
   int channels{};
   int bitDepth{};
+  bool signed8{false}; // 8-bit: RIFF formats are unsigned, Korg is signed
   int64_t totalSamples{};
   uint32_t sourceRate{44100};
   std::vector<int> regionIndices;
@@ -158,7 +161,8 @@ struct ConvertedSample
 };
 ConvertedSample convertRawSampleData(
     const void* rawData, int64_t rawSize, int channels, int bitDepth,
-    int64_t totalSamples, uint32_t sourceRate, int targetRate)
+    int64_t totalSamples, uint32_t sourceRate, int targetRate,
+    bool signed8 = false)
 {
   ConvertedSample result;
   if(!rawData || rawSize <= 0 || totalSamples <= 0)
@@ -231,17 +235,21 @@ ConvertedSample convertRawSampleData(
   else if(bitDepth == 8)
   {
     constexpr double scale = 1.0 / 128.0;
+    const int offset = signed8 ? 0 : 128;
+    const auto s8 = [&](uint8_t v) {
+      return signed8 ? (double)(int8_t)v * scale : ((int)v - offset) * scale;
+    };
     if(channels == 1)
     {
       for(int64_t i = 0; i < totalSamples; i++)
-        out_data[0][i] = ((int)raw[i] - 128) * scale;
+        out_data[0][i] = s8(raw[i]);
     }
     else if(channels == 2)
     {
       for(int64_t i = 0; i < totalSamples; i++)
       {
-        out_data[0][i] = ((int)raw[i * 2] - 128) * scale;
-        out_data[1][i] = ((int)raw[i * 2 + 1] - 128) * scale;
+        out_data[0][i] = s8(raw[i * 2]);
+        out_data[1][i] = s8(raw[i * 2 + 1]);
       }
     }
   }
@@ -313,7 +321,7 @@ void convertAndPrune(
 
     const auto conv = convertRawSampleData(
         raw.data.data(), raw.data.size(), raw.channels, raw.bitDepth,
-        raw.totalSamples, raw.sourceRate, targetRate);
+        raw.totalSamples, raw.sourceRate, targetRate, raw.signed8);
     if(!conv.data || conv.data->empty() || (*conv.data)[0].empty())
       continue;
     const int64_t frames = (int64_t)(*conv.data)[0].size();
@@ -1304,6 +1312,62 @@ bool loadSamples_hydrogen(
 // KORG .KMP multisamples
 /////////////////////////////
 
+// libgig assumes .KSF files live in a directory named after the .KMP. Real
+// banks keep them as siblings, in per-floppy subdirectories ("disk 2"), or
+// in shared folders of the bank collection, and DOS-era media mixes case
+// freely. This index maps lowercased file names to paths, first across the
+// KMP's own directory tree, then (on miss) across the parent collection.
+struct KorgSampleIndex
+{
+  QDir kmpDir;
+  QHash<QString, QString> files;
+  int level{0}; // 0: not built, 1: kmp dir tree, 2: + parent tree
+
+  explicit KorgSampleIndex(const QString& kmpPath)
+      : kmpDir{QFileInfo(kmpPath).dir()}
+  {
+  }
+
+  void indexTree(const QString& root)
+  {
+    QDirIterator it{root, QDir::Files, QDirIterator::Subdirectories};
+    while(it.hasNext())
+    {
+      it.next();
+      const auto name = it.fileName().toLower();
+      if(!files.contains(name))
+        files.insert(name, it.filePath());
+    }
+  }
+
+  std::string resolve(const std::string& libgigGuess, const std::string& bareName)
+  {
+    if(QFileInfo::exists(QString::fromStdString(libgigGuess)))
+      return libgigGuess;
+
+    const QString bare = QString::fromStdString(bareName).toLower();
+    if(level < 1)
+    {
+      level = 1;
+      indexTree(kmpDir.absolutePath());
+    }
+    if(auto it = files.constFind(bare); it != files.constEnd())
+      return it->toStdString();
+
+    if(level < 2)
+    {
+      level = 2;
+      QDir parent = kmpDir;
+      if(parent.cdUp())
+        indexTree(parent.absolutePath());
+      if(auto it = files.constFind(bare); it != files.constEnd())
+        return it->toStdString();
+    }
+
+    return libgigGuess; // let phase 2 fail and prune the region
+  }
+};
+
 // A .KMP maps contiguous key ranges to mono .KSF sample files; regions are
 // chained by TopKey (a region starts right above the previous one's top).
 std::shared_ptr<GigFileInfo>
@@ -1320,6 +1384,8 @@ loadMetadata_korg(const QString& filePath, int instrumentIndex)
 
   GigInstrument instr;
   instr.name = info->name;
+
+  KorgSampleIndex index{filePath};
 
   int keyLow = 0;
   for(int i = 0; i < kmp.GetRegionCount(); i++)
@@ -1343,7 +1409,8 @@ loadMetadata_korg(const QString& filePath, int instrumentIndex)
       region.sample.midiUnityNote = std::min<uint32_t>(rgn->OriginalKey, 127);
       region.sample.fineTune = std::clamp<int>(rgn->Tune, -99, 99);
       region.pan = (int8_t)std::clamp<int>(rgn->Pan, -64, 63);
-      region.sample.sourceFile = rgn->FullSampleFileName();
+      region.sample.sourceFile
+          = index.resolve(rgn->FullSampleFileName(), sampleName);
       sanitizeRegion(region);
       instr.regions.push_back(std::move(region));
     }
@@ -1386,11 +1453,21 @@ bool collectRawBuffers_korg(
     try
     {
       Korg::KSFSample ksf(src);
-      // The proprietary Korg sample compression is not implemented by libgig
-      if(ksf.IsCompressed())
-        continue;
 
       const auto buf = ksf.LoadSampleData();
+      // libgig's IsCompressed() (attribute bit 0x10) misfires on plain-PCM
+      // Trinity files: trust the payload size instead — when it matches
+      // SamplePoints * frame size the data is raw PCM whatever the flag says.
+      const int64_t expected
+          = (int64_t)ksf.SamplePoints * std::max(1, ksf.FrameSize());
+      const bool rawPcm
+          = buf.pStart && expected > 0 && (int64_t)buf.Size >= expected;
+      if(!rawPcm && ksf.IsCompressed())
+      {
+        // Genuinely compressed Korg data is not implemented by libgig
+        ksf.ReleaseSampleData();
+        continue;
+      }
       if(buf.pStart && buf.Size > 0)
       {
         RawSampleBuffer raw;
@@ -1398,6 +1475,7 @@ bool collectRawBuffers_korg(
         std::memcpy(raw.data.data(), buf.pStart, buf.Size);
         raw.channels = std::max<int>(1, ksf.Channels);
         raw.bitDepth = ksf.BitDepth;
+        raw.signed8 = true; // Korg 8-bit samples are signed
         raw.totalSamples = ksf.SamplePoints;
         raw.sourceRate = ksf.SampleRate;
         raw.regionIndices.push_back((int)regionIdx);
@@ -1590,7 +1668,10 @@ loadGigFileMetadata(const QString& filePath, int instrumentIndex)
   }
   catch(RIFF::Exception& e)
   {
-    qWarning() << "libgig metadata error:" << e.Message.c_str();
+    if(e.Message.find("Unsupported version") != std::string::npos)
+      qWarning() << "Ogg-compressed SoundFonts (.sf3) are not supported:" << filePath;
+    else
+      qWarning() << "libgig metadata error:" << e.Message.c_str();
     return {};
   }
   catch(...)
