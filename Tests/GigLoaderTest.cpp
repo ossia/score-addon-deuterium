@@ -321,7 +321,7 @@ QString makeHydrogenKit(const QString& dirPath)
   return dirPath + "/drumkit.xml";
 }
 
-QString makeSf2File(const QString& path)
+QString makeSf2File(const QString& path, int8_t pitchCorrection = 0)
 {
   using namespace sf2writer;
   auto data = rampData();
@@ -399,8 +399,8 @@ QString makeSf2File(const QString& path)
   u32(shdr, 10);           // start loop
   u32(shdr, 90);           // end loop
   u32(shdr, RATE);         // sample rate
-  u8(shdr, 64);            // original pitch
-  u8(shdr, 0);             // pitch correction
+  u8(shdr, 64);                       // original pitch
+  u8(shdr, uint8_t(pitchCorrection)); // pitch correction, signed cents
   u16(shdr, 0);            // sample link
   u16(shdr, 1);            // mono sample
   name20(shdr, "EOS");
@@ -907,6 +907,20 @@ TEST_CASE("loader: hostile_drumkit_is_sanitized", "[deuterium]")
     for(auto& ch : *lr.sample.data)
       for(auto s : ch)
         REQUIRE(std::isfinite(s));
+}
+
+// The shdr pitch correction is signed cents and must reach the region's
+// fine tune: hardware-sampled banks (e.g. phone rips) rely on it, and
+// without it adjacent key ranges end up audibly out of tune relative to
+// each other.
+TEST_CASE("loader: sf2_pitch_correction_applied", "[deuterium]")
+{
+  const auto path = makeSf2File(tmp("pitchcorr.sf2"), int8_t(-32));
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  REQUIRE(approxEq(regions[0].sample.fineTune, -32.f));
 }
 
 TEST_CASE("loader: sf2", "[deuterium]")
