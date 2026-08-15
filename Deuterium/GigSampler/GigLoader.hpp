@@ -37,10 +37,18 @@ struct GigRegion
   uint8_t velHigh{127};
 
   // EG1 (amplitude)
+  double eg1Delay{0.0};
   double eg1Attack{0.0};
+  double eg1Hold{0.0};
   double eg1Decay{0.0};
   double eg1Sustain{1.0};
   double eg1Release{0.05};
+  // dB-slope (EMU) time semantics: decay time is for a full 96 dB fall and
+  // ends at the sustain level (SF2/DLS); false = time-to-sustain semantics
+  // (gig, Hydrogen, user knobs)
+  bool eg1DbSlope{false};
+  // Hold scaling per key (SF2 keynumToVolEnvHold), timecents/key rel. key 60
+  float keynumToHold{0.f};
 
   // Filter
   bool vcfEnabled{false};

@@ -160,6 +160,188 @@ basePitchSemitones(const GigRegion& r, const SamplerParams& p, int note) noexcep
   return st;
 }
 
+// Amplitude envelope: delay - linear-amplitude attack - hold - decay -
+// sustain - release, with two decay/release time semantics:
+//
+// - dB mode (SF2 / DLS, the EMU model): decay and release run at constant
+//   dB slopes of 96 dB over their configured time; the decay phase ends
+//   when the sustain level is reached, so a shallow sustain decays quickly.
+// - linear mode (gig / Hydrogen / user-set ADSR knobs): the decay reaches
+//   the sustain level after exactly the decay time and the release reaches
+//   silence after exactly the release time, whatever the starting level -
+//   the semantics musicians expect from ADSR knobs. The slopes are still
+//   exponential (dB-linear), so nothing clicks.
+//
+// Decay, sustain and release advance by one precomputed multiplication per
+// sample - no transcendentals on the audio thread after a stage starts.
+struct AmpEnv
+{
+  static constexpr double full_scale_db = 96.;
+  static constexpr double silence_amp = 1e-5; // ~ -100 dB
+
+  enum Stage : uint8_t
+  {
+    Delay,
+    Attack,
+    Hold,
+    Decay,
+    Sustain,
+    Release,
+    Done
+  };
+
+  void set_sample_rate(double r) noexcept { m_rate = std::max(1., r); }
+  void delay(double s) noexcept { m_delay = std::max(0., s); }
+  void attack(double s) noexcept { m_attack = std::max(0., s); }
+  void hold(double s) noexcept { m_hold = std::max(0., s); }
+  void decay(double s) noexcept { m_decay = std::max(1e-4, s); }
+  void sustain(double lin) noexcept { m_sustain = std::clamp(lin, 0., 1.); }
+  void release(double s) noexcept { m_release = std::max(1e-4, s); }
+  void dbMode(bool b) noexcept { m_dbMode = b; }
+  void amp(double) noexcept { } // gam::ADSR API compatibility; peak is 1
+
+  void reset() noexcept
+  {
+    m_stage = Delay;
+    m_amp = 0.;
+    m_counter = 0;
+    m_mul = 1.;
+  }
+
+  [[nodiscard]] bool done() const noexcept { return m_stage == Done; }
+
+  // Enter the release stage from wherever the envelope currently is
+  void startRelease() noexcept
+  {
+    if(m_stage == Release || m_stage == Done)
+      return;
+    if(m_amp <= silence_amp)
+    {
+      m_stage = Done;
+      m_amp = 0.;
+      return;
+    }
+    const double relSamples = std::max(1., m_release * m_rate);
+    if(m_dbMode)
+    {
+      // Constant slope: 96 dB over the release time, from the current level
+      m_mul = std::pow(10., -full_scale_db / (20. * relSamples));
+    }
+    else
+    {
+      // Reach silence after exactly the release time from the current level
+      m_mul = std::pow(silence_amp / m_amp, 1. / relSamples);
+    }
+    m_stage = Release;
+  }
+
+  double operator()() noexcept
+  {
+    switch(m_stage)
+    {
+      case Delay:
+        if(m_counter == 0)
+        {
+          m_counter = (int64_t)(m_delay * m_rate);
+          if(m_counter <= 0)
+          {
+            m_stage = Attack;
+            return (*this)();
+          }
+        }
+        if(--m_counter <= 0)
+          m_stage = Attack;
+        return 0.;
+
+      case Attack:
+      {
+        const double inc = 1. / std::max(1., m_attack * m_rate);
+        m_amp += inc;
+        if(m_amp >= 1.)
+        {
+          m_amp = 1.;
+          m_stage = Hold;
+          m_counter = (int64_t)(m_hold * m_rate);
+        }
+        return m_amp;
+      }
+
+      case Hold:
+        if(--m_counter <= 0)
+          enterDecay();
+        return 1.;
+
+      case Decay:
+        m_amp *= m_mul;
+        if(m_amp <= m_sustainAmp)
+        {
+          m_amp = m_sustainAmp;
+          m_stage = Sustain;
+        }
+        // A near-silent decay tail will never be heard again: free the voice
+        if(m_amp <= silence_amp)
+        {
+          m_stage = m_sustainAmp <= silence_amp ? Done : Sustain;
+          if(m_stage == Done)
+            m_amp = 0.;
+        }
+        return m_amp;
+
+      case Sustain:
+        return m_amp;
+
+      case Release:
+        m_amp *= m_mul;
+        if(m_amp <= silence_amp)
+        {
+          m_amp = 0.;
+          m_stage = Done;
+        }
+        return m_amp;
+
+      default:
+      case Done:
+        return 0.;
+    }
+  }
+
+private:
+  void enterDecay() noexcept
+  {
+    m_sustainAmp = m_sustain;
+    if(m_sustainAmp >= 1.)
+    {
+      m_stage = Sustain;
+      m_amp = 1.;
+      return;
+    }
+    const double decSamples = std::max(1., m_decay * m_rate);
+    if(m_dbMode)
+    {
+      // The configured time is for the full 96 dB fall; the phase stops at
+      // the sustain level (SF2 semantics)
+      m_mul = std::pow(10., -full_scale_db / (20. * decSamples));
+    }
+    else
+    {
+      // Reach the sustain level after exactly the decay time
+      const double target = std::max(m_sustainAmp, silence_amp);
+      m_mul = std::pow(target, 1. / decSamples);
+    }
+    m_stage = Decay;
+  }
+
+  double m_rate{48000.};
+  double m_delay{}, m_attack{0.001}, m_hold{}, m_decay{0.001}, m_release{0.016};
+  double m_sustain{1.};
+  double m_amp{};
+  double m_sustainAmp{1.};
+  double m_mul{1.};
+  int64_t m_counter{};
+  Stage m_stage{Done};
+  bool m_dbMode{false};
+};
+
 // Amplitude envelope resolution: the global override wins when set (>= 0)
 struct ResolvedEnv
 {

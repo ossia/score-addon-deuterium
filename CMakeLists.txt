@@ -139,7 +139,6 @@ target_link_libraries(
   PRIVATE
 
     $<BUILD_INTERFACE:dspfilters>
-    $<BUILD_INTERFACE:gamma>
 )
 
 setup_score_plugin(${PROJECT_NAME})
