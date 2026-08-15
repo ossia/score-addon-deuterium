@@ -954,16 +954,18 @@ TEST_CASE("loader: sf2_attenuation_emu_factor", "[deuterium]")
   REQUIRE(std::abs(info->instruments[0].regions[0].sampleAttenuation - expected) < 1e-6);
 }
 
-// The decay generator is the time for a full-scale fall; the audible
-// peak-to-sustain time is scaled by the sustain depth
-TEST_CASE("loader: sf2_decay_scaled_by_sustain", "[deuterium]")
+// The decay generator's raw full-scale time is stored; the engine's dB-slope
+// envelope mode (eg1DbSlope) then ends the decay at the sustain level
+TEST_CASE("loader: sf2_decay_and_hold", "[deuterium]")
 {
-  // decay = 0 tc = 1 s, sustain = 100 cB -> audible decay ~ 0.1 s
-  const auto path = makeSf2File(tmp("decay.sf2"), 0, {{36, 0}, {37, 100}});
+  // decay = 0 tc = 1 s, sustain = 100 cB, hold = -1200 tc = 0.5 s
+  const auto path = makeSf2File(tmp("decay.sf2"), 0, {{36, 0}, {37, 100}, {35, -1200}});
   auto info = loadGigFileMetadata(path);
   REQUIRE(info);
   auto& r = info->instruments[0].regions[0];
-  REQUIRE((r.eg1Decay > 0.09 && r.eg1Decay < 0.11));
+  REQUIRE(r.eg1DbSlope);
+  REQUIRE((r.eg1Decay > 0.99 && r.eg1Decay < 1.01));
+  REQUIRE((r.eg1Hold > 0.49 && r.eg1Hold < 0.51));
   REQUIRE(std::abs(r.eg1Sustain - std::pow(10.0, -100.0 / 200.0)) < 1e-6);
 }
 

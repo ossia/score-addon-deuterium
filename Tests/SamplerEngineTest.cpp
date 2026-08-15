@@ -97,6 +97,97 @@ TEST_CASE("engine: velocity_zone_crossfade", "[deuterium]")
   REQUIRE(approxEq(velocityZoneGain(r, 0, 1.), 0.));
 }
 
+TEST_CASE("engine: amp_env_db_mode", "[deuterium]")
+{
+  constexpr double rate = 48000.;
+  AmpEnv env;
+  env.set_sample_rate(rate);
+  env.attack(0.001);
+  env.hold(0.1);
+  env.decay(1.0);                                // full-scale (96 dB) time
+  env.sustain(std::pow(10.0, -100.0 / 200.0));   // -10 dB
+  env.release(1.0);
+  env.dbMode(true);
+  env.reset();
+
+  auto runFor = [&](double secs) {
+    double v = 0.;
+    for(int i = 0; i < int(secs * rate); i++)
+      v = env();
+    return v;
+  };
+
+  // Mid-hold: still at full peak
+  REQUIRE(approxEq(runFor(0.001 + 0.05), 1.0));
+  // 50 ms into the decay: 96 dB/s slope -> ~4.8 dB down, above sustain
+  const double v1 = runFor(0.05 + 0.05);
+  REQUIRE((v1 > 0.5 && v1 < 0.7));
+  // Sustain (-10 dB) is reached after ~104 ms of decay
+  const double v2 = runFor(0.2);
+  REQUIRE(std::abs(v2 - std::pow(10.0, -0.5)) < 1e-3);
+
+  // Release: -10 dB -> -100 dB at 96 dB/s takes ~0.94 s
+  env.startRelease();
+  runFor(0.5);
+  REQUIRE(!env.done());
+  runFor(0.6);
+  REQUIRE(env.done());
+  REQUIRE(approxEq(env(), 0.0));
+}
+
+TEST_CASE("engine: amp_env_linear_mode", "[deuterium]")
+{
+  constexpr double rate = 48000.;
+  AmpEnv env;
+  env.set_sample_rate(rate);
+  env.attack(0.001);
+  env.hold(0.);
+  env.decay(0.5); // time-to-sustain in linear mode
+  env.sustain(0.5);
+  env.release(0.2);
+  env.dbMode(false);
+  env.reset();
+
+  auto runFor = [&](double secs) {
+    double v = 0.;
+    for(int i = 0; i < int(secs * rate); i++)
+      v = env();
+    return v;
+  };
+
+  // Just before the decay time: still above sustain; just after: at sustain
+  const double before = runFor(0.001 + 0.45);
+  REQUIRE(before > 0.5);
+  const double after = runFor(0.1);
+  REQUIRE(std::abs(after - 0.5) < 0.02);
+
+  // Release reaches silence after ~ the release time from the current level
+  env.startRelease();
+  runFor(0.1);
+  REQUIRE(!env.done());
+  runFor(0.15);
+  REQUIRE(env.done());
+}
+
+TEST_CASE("engine: amp_env_release_during_attack", "[deuterium]")
+{
+  AmpEnv env;
+  env.set_sample_rate(48000.);
+  env.attack(1.0);
+  env.decay(1.0);
+  env.sustain(1.0);
+  env.release(0.05);
+  env.dbMode(true);
+  env.reset();
+  // 0.1 s into a 1 s attack, then note-off: must reach silence, not hang
+  for(int i = 0; i < 4800; i++)
+    env();
+  env.startRelease();
+  for(int i = 0; i < 48000 && !env.done(); i++)
+    env();
+  REQUIRE(env.done());
+}
+
 TEST_CASE("engine: envelope_override", "[deuterium]")
 {
   auto r = makeRegion();

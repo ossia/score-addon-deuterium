@@ -16,8 +16,6 @@
 #include <Deuterium/GigSampler/Controls.hpp>
 #include <Deuterium/GigSampler/ProcessModel.hpp>
 #include <Deuterium/GigSampler/SamplerEngine.hpp>
-#include <Gamma/Envelope.h>
-#include <halp/compat/gamma.hpp>
 #include <libremidi/detail/conversion.hpp>
 
 #include <algorithm>
@@ -31,7 +29,7 @@ namespace Executor
 struct gig_voice
 {
   const GigRegion* region{};
-  gam::ADSR<double, double, halp::compat::gamma_domain> amp_adsr;
+  AmpEnv amp_adsr;
 
   Biquad filter;
   LofiState lofi;
@@ -193,7 +191,7 @@ public:
     {
       if(v.playing && !v.released)
       {
-        v.amp_adsr.release();
+        v.amp_adsr.startRelease();
         v.filterEnv.release();
         v.released = true;
       }
@@ -600,7 +598,7 @@ private:
       if(voice.oneShotEff)
         continue;
 
-      voice.amp_adsr.release();
+      voice.amp_adsr.startRelease();
       voice.filterEnv.release();
       voice.released = true;
     }
@@ -722,8 +720,14 @@ private:
     const double attack
         = legatoTransfer && region.pitchTrack ? 0.003 : std::max(0.001, env.attack);
     voice.amp_adsr.attack(attack);
-    // High notes decay faster (SF2 keynumToVolEnvDecay, timecents per key
-    // relative to key 60)
+    voice.amp_adsr.delay(region.eg1Delay);
+    // High notes hold and decay faster (SF2 keynumToVolEnv*, timecents per
+    // key relative to key 60)
+    double hold = region.eg1Hold;
+    if(region.keynumToHold != 0.f && hold > 0.)
+      hold = std::clamp(
+          hold * std::exp2(region.keynumToHold * (60 - note) / 1200.0), 0., 120.0);
+    voice.amp_adsr.hold(hold);
     double decay = std::max(0.001, env.decay);
     if(region.keynumToDecay != 0.f)
       decay = std::clamp(
@@ -733,6 +737,9 @@ private:
     voice.amp_adsr.sustain(env.sustain);
     // 16 ms floor like FluidSynth: shorter releases click
     voice.amp_adsr.release(std::max(0.016, env.release));
+    // The EMU dB-slope time semantics only apply to the file's own envelope;
+    // user-set knobs mean time-to-sustain / time-to-silence
+    voice.amp_adsr.dbMode(region.eg1DbSlope && p.decay < 0.f && p.release < 0.f);
     voice.amp_adsr.amp(1.0);
 
     // Filter

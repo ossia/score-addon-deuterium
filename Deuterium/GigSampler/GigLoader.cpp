@@ -654,8 +654,14 @@ void applyDlsArticulations(DLS::Articulator& art, GigRegion& region)
       const auto scale = (int32_t)c.Scale;
       switch(c.Destination)
       {
+        case DLS::conn_dst_eg1_delaytime:
+          region.eg1Delay = dlsTimeCentsToSeconds(scale);
+          break;
         case DLS::conn_dst_eg1_attacktime:
           region.eg1Attack = dlsTimeCentsToSeconds(scale);
+          break;
+        case DLS::conn_dst_eg1_holdtime:
+          region.eg1Hold = dlsTimeCentsToSeconds(scale);
           break;
         case DLS::conn_dst_eg1_decaytime:
           region.eg1Decay = dlsTimeCentsToSeconds(scale);
@@ -978,18 +984,19 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
           (int64_t)iz->startAddrsOffset + 32768ll * iz->startAddrsCoarseOffset, 0,
           INT32_MAX);
 
-      // EG1: hold folded into the decay stage (our envelope has no hold).
-      // Per the spec the decay generator is the time for a full 100 dB fall;
-      // the phase ends when the sustain level is reached, so the audible
-      // decay is that time scaled by the sustain depth (FluidSynth model).
+      // EG1, in the EMU dB-slope semantics the engine implements natively:
+      // the decay time is for a full-scale fall and ends at the sustain level
       const double sustainCb = std::clamp(iz->GetEG1Sustain(pz), 0, 1440);
+      region.eg1DbSlope = true;
+      region.eg1Delay = iz->GetEG1PreAttackDelay(pz);
       region.eg1Attack = iz->GetEG1Attack(pz);
-      region.eg1Decay = iz->GetEG1Hold(pz)
-                        + iz->GetEG1Decay(pz) * std::min(sustainCb, 1000.0) / 1000.0;
+      region.eg1Hold = iz->GetEG1Hold(pz);
+      region.eg1Decay = iz->GetEG1Decay(pz);
       region.eg1Sustain = std::pow(10.0, -sustainCb / 200.0);
       region.eg1Release = iz->GetEG1Release(pz);
       // High notes decay faster (timecents per key relative to key 60)
       region.keynumToDecay = iz->GetKeynumToVolEnvDecay(pz);
+      region.keynumToHold = iz->GetKeynumToVolEnvHold(pz);
 
       // Filter: 13500 absolute cents is the "fully open" default, but a
       // non-zero Q still applies its gain change there (FluidSynth never
