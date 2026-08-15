@@ -916,7 +916,10 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
           10.0, -std::clamp(iz->GetInitialAttenuation(pz), 0, 1440) / 200.0);
       region.sample.midiUnityNote = (uint32_t)std::clamp(
           iz->GetUnityNote() - iz->GetCoarseTune(pz), 0, 127);
-      region.sample.fineTune = iz->GetFineTune(pz);
+      // The sample header's pitch correction (signed cents) applies on top
+      // of the fine tune generators; banks sampled from hardware rely on it
+      // heavily and skipping it leaves regions audibly out of tune.
+      region.sample.fineTune = iz->GetFineTune(pz) + smp->PitchCorrection;
       region.pan = (int8_t)std::clamp(iz->GetPan(pz), -64, 63);
       region.sampleStartOffset = (uint16_t)std::clamp<int64_t>(
           (int64_t)iz->startAddrsOffset + 32768ll * iz->startAddrsCoarseOffset, 0,
