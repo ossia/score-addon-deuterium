@@ -18,8 +18,10 @@
 #include <score/command/Dispatchers/CommandDispatcher.hpp>
 #include <score/graphics/TextItem.hpp>
 #include <score/graphics/layouts/GraphicsBoxLayout.hpp>
+#include <score/graphics/layouts/GraphicsGridLayout.hpp>
 #include <score/graphics/layouts/GraphicsTabLayout.hpp>
 #include <score/graphics/widgets/QGraphicsCombo.hpp>
+#include <score/model/Skin.hpp>
 
 #include <QFileInfo>
 
@@ -108,11 +110,22 @@ struct UiBuilder final : Process::LayoutBuilderBase
         dot->setPos(0., 24.);
   }
 
-  void row(QGraphicsItem* parent, std::initializer_list<int> controls)
+  // A fixed-column grid: every control sits in a uniform, centred cell so
+  // rows and columns align (the layout computes the cell from the largest
+  // child).
+  void grid(QGraphicsItem* parent, int columns, std::initializer_list<int> controls)
   {
-    auto* r = start<score::GraphicsHBoxLayout>(parent, 2.);
+    auto* g = start<score::GraphicsGridColumnsLayout>(parent, 2.);
+    g->setColumns(columns);
     for(int c : controls)
-      knobOrControl(r, c);
+      knobOrControl(g, c);
+  }
+
+  // A small section title inside a page.
+  void section(QGraphicsItem* parent, std::string_view name)
+  {
+    auto* lab = makeLabel(name);
+    lab->setParentItem(parent);
   }
 };
 }
@@ -190,11 +203,15 @@ private:
         m_model.inlets(),
         m_model.outlets()};
 
-    auto* main = b.start<score::GraphicsVBoxLayout>(nullptr, 3.);
+    auto& skin = score::Skin::instance();
 
-    // Header: MIDI port + bank / instrument name
+    auto* main = b.start<score::GraphicsVBoxLayout>(nullptr, 4.);
+    main->setBrush(skin.Background2.darker);
+
+    // Header strip: MIDI port, file chooser, instrument, bank name
     {
-      auto* header = b.start<score::GraphicsHBoxLayout>(main, 3.);
+      auto* header = b.start<score::GraphicsHBoxLayout>(main, 4.);
+      header->setBrush(skin.Background2.darker300);
       if(!m_model.inlets().empty())
       {
         auto midi = b.makePort(*m_model.inlets().front());
@@ -238,6 +255,7 @@ private:
     }
 
     auto* tabs = b.start<score::GraphicsTabLayout>(main, 3.);
+    tabs->setBrush(skin.Background2.darker300);
     tabs->addTab(QStringLiteral(" Main "));
     tabs->addTab(QStringLiteral(" Sample "));
     tabs->addTab(QStringLiteral(" Filter "));
@@ -245,31 +263,40 @@ private:
     tabs->addTab(QStringLiteral(" Mod "));
 
     {
-      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 2.);
-      b.row(page, {Volume, Pan, Transpose, FineTune, BendRange});
-      b.row(page, {Chromatic, ChromaticRoot, RoundRobin});
+      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
+      page->setBrush(skin.Background2.main);
+      b.grid(page, 5, {Volume, Pan, Transpose, FineTune, BendRange});
+      b.grid(page, 3, {Chromatic, ChromaticRoot, RoundRobin});
     }
     {
-      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 2.);
-      b.row(page, {StartOffset, Reverse, Lofi});
-      b.row(page, {LoopMode, LoopXfade, VelToStart});
+      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
+      page->setBrush(skin.Background2.main);
+      b.grid(page, 3, {StartOffset, Reverse, Lofi});
+      b.grid(page, 3, {LoopMode, LoopXfade, VelToStart});
     }
     {
-      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 2.);
-      b.row(page, {FilterType, Cutoff, Resonance, FilterKeytrack});
-      b.row(page, {FilterEnvAmount, VelToCutoff});
-      b.row(page, {FilterEnvAttack, FilterEnvDecay, FilterEnvSustain, FilterEnvRelease});
+      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
+      page->setBrush(skin.Background2.main);
+      b.grid(page, 5, {FilterType, Cutoff, Resonance, FilterKeytrack, VelToCutoff});
+      b.section(page, "Envelope");
+      b.grid(
+          page, 5,
+          {FilterEnvAmount, FilterEnvAttack, FilterEnvDecay, FilterEnvSustain,
+           FilterEnvRelease});
     }
     {
-      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 2.);
-      b.row(page, {EnvFromFile, Attack, Decay, Sustain, Release});
-      b.row(page, {VelAmount, VelCurve, VelXfade});
-      b.row(page, {PitchEnvAmount, PitchEnvDecay});
+      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
+      page->setBrush(skin.Background2.main);
+      b.section(page, "Envelope");
+      b.grid(page, 5, {EnvFromFile, Attack, Decay, Sustain, Release});
+      b.section(page, "Velocity & pitch");
+      b.grid(page, 5, {VelAmount, VelCurve, VelXfade, PitchEnvAmount, PitchEnvDecay});
     }
     {
-      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 2.);
-      b.row(page, {LfoDest, LfoRate, LfoDepth, LfoDelay});
-      b.row(page, {VoiceMode, Glide, Polyphony});
+      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
+      page->setBrush(skin.Background2.main);
+      b.grid(page, 4, {LfoDest, LfoRate, LfoDepth, LfoDelay});
+      b.grid(page, 4, {VoiceMode, Glide, Polyphony});
     }
 
     b.finalizeLayout(this);
