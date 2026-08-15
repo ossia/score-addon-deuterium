@@ -106,6 +106,7 @@ struct RawSampleBuffer
   int channels{};
   int bitDepth{};
   bool signed8{false}; // 8-bit: RIFF formats are unsigned, Korg is signed
+  int takeChannel{-1}; // >= 0: collapse a stereo frame to this channel
   int64_t totalSamples{};
   uint32_t sourceRate{44100};
   std::vector<int> regionIndices;
@@ -162,7 +163,7 @@ struct ConvertedSample
 ConvertedSample convertRawSampleData(
     const void* rawData, int64_t rawSize, int channels, int bitDepth,
     int64_t totalSamples, uint32_t sourceRate, int targetRate,
-    bool signed8 = false)
+    bool signed8 = false, int takeChannel = -1)
 {
   ConvertedSample result;
   if(!rawData || rawSize <= 0 || totalSamples <= 0)
@@ -170,12 +171,16 @@ ConvertedSample convertRawSampleData(
   if(bitDepth != 8 && bitDepth != 16 && bitDepth != 24)
     return result;
 
-  const int outChannels = std::max(1, channels);
+  // SF2 stereo pairs are two independent mono samples stored in a stereo
+  // frame with the other half silent: keep only the real channel and let
+  // the pan generator position it (FluidSynth model, halves the memory)
+  const bool collapse = channels == 2 && takeChannel >= 0 && takeChannel <= 1;
+  const int outChannels = collapse ? 1 : std::max(1, channels);
 
   // The file libraries do not guarantee that LoadSampleData() caches as many
   // frames as the headers advertise (truncated / corrupt files): never trust
   // the header over the byte count actually returned.
-  const int64_t frameSize = int64_t(outChannels) * (bitDepth / 8);
+  const int64_t frameSize = int64_t(std::max(1, channels)) * (bitDepth / 8);
   totalSamples = std::min(totalSamples, rawSize / frameSize);
   if(totalSamples <= 0)
     return result;
@@ -197,6 +202,11 @@ ConvertedSample convertRawSampleData(
       for(int64_t i = 0; i < totalSamples; i++)
         out_data[0][i] = samples[i] * scale;
     }
+    else if(collapse)
+    {
+      for(int64_t i = 0; i < totalSamples; i++)
+        out_data[0][i] = samples[i * 2 + takeChannel] * scale;
+    }
     else if(channels == 2)
     {
       for(int64_t i = 0; i < totalSamples; i++)
@@ -216,6 +226,16 @@ ConvertedSample convertRawSampleData(
         int32_t s = (int32_t)raw[i * 3] | ((int32_t)raw[i * 3 + 1] << 8)
                     | ((int32_t)(int8_t)raw[i * 3 + 2] << 16);
         out_data[0][i] = s * scale;
+      }
+    }
+    else if(collapse)
+    {
+      for(int64_t i = 0; i < totalSamples; i++)
+      {
+        const int64_t off = i * 6 + takeChannel * 3;
+        int32_t v = (int32_t)raw[off] | ((int32_t)raw[off + 1] << 8)
+                    | ((int32_t)(int8_t)raw[off + 2] << 16);
+        out_data[0][i] = v * scale;
       }
     }
     else if(channels == 2)
@@ -244,6 +264,11 @@ ConvertedSample convertRawSampleData(
       for(int64_t i = 0; i < totalSamples; i++)
         out_data[0][i] = s8(raw[i]);
     }
+    else if(collapse)
+    {
+      for(int64_t i = 0; i < totalSamples; i++)
+        out_data[0][i] = s8(raw[i * 2 + takeChannel]);
+    }
     else if(channels == 2)
     {
       for(int64_t i = 0; i < totalSamples; i++)
@@ -269,23 +294,59 @@ ConvertedSample convertRawSampleData(
     // The upper bound caps the resampled buffer at 2 GB per channel
     if(newLen > 0 && newLen < (int64_t(1) << 28))
     {
+      // Windowed-sinc resampling through a polyphase kernel table:
+      // flat passband and real alias rejection on downsampling, unlike
+      // linear interpolation. Runs on the loader thread, never on the
+      // audio thread.
+      constexpr int taps = 32;
+      constexpr int half = taps / 2;
+      constexpr int phases = 512;
+      const double cutoff = 0.90 * std::min(1.0, ratio); // rel. source Nyquist
+      std::vector<double> kernel((phases + 1) * taps);
+      for(int ph = 0; ph <= phases; ph++)
+      {
+        const double frac = (double)ph / phases;
+        double sum = 0.;
+        for(int t = 0; t < taps; t++)
+        {
+          const double dist = (t - half + 1) - frac; // tap offset from srcPos
+          const double x = dist * cutoff;
+          const double sinc = x == 0. ? 1. : std::sin(M_PI * x) / (M_PI * x);
+          const double wArg = dist / half;
+          const double w = std::abs(wArg) >= 1.
+                               ? 0.
+                               : 0.42 + 0.5 * std::cos(M_PI * wArg)
+                                     + 0.08 * std::cos(2. * M_PI * wArg);
+          kernel[ph * taps + t] = cutoff * sinc * w;
+          sum += kernel[ph * taps + t];
+        }
+        // Unity DC gain per phase (kills fractional-position gain ripple)
+        if(sum > 1e-9)
+          for(int t = 0; t < taps; t++)
+            kernel[ph * taps + t] /= sum;
+      }
+
       auto resampled = std::make_shared<ossia::audio_array>();
       resampled->resize(outChannels);
       for(int c = 0; c < outChannels; c++)
       {
         (*resampled)[c].resize(newLen);
+        const auto& src = out_data[c];
         for(int64_t i = 0; i < newLen; i++)
         {
-          double srcPos = i / ratio;
-          int64_t idx = (int64_t)srcPos;
-          double frac = srcPos - idx;
-          if(idx + 1 < totalSamples)
-            (*resampled)[c][i]
-                = out_data[c][idx] * (1.0 - frac) + out_data[c][idx + 1] * frac;
-          else if(idx < totalSamples)
-            (*resampled)[c][i] = out_data[c][idx];
-          else
-            (*resampled)[c][i] = 0.0;
+          const double srcPos = i / ratio;
+          const int64_t idx = (int64_t)srcPos;
+          const int ph
+              = (int)std::lround((srcPos - idx) * phases); // 0..phases
+          const double* k = &kernel[ph * taps];
+          double acc = 0.;
+          for(int t = 0; t < taps; t++)
+          {
+            const int64_t j = idx - half + 1 + t;
+            if(j >= 0 && j < totalSamples)
+              acc += src[j] * k[t];
+          }
+          (*resampled)[c][i] = acc;
         }
       }
       arr = std::move(resampled);
@@ -321,7 +382,8 @@ void convertAndPrune(
 
     const auto conv = convertRawSampleData(
         raw.data.data(), raw.data.size(), raw.channels, raw.bitDepth,
-        raw.totalSamples, raw.sourceRate, targetRate, raw.signed8);
+        raw.totalSamples, raw.sourceRate, targetRate, raw.signed8,
+        raw.takeChannel);
     if(!conv.data || conv.data->empty() || (*conv.data)[0].empty())
       continue;
     const int64_t frames = (int64_t)(*conv.data)[0].size();
@@ -1217,6 +1279,21 @@ bool collectRawBuffers_sf2(
                     : 16;
           raw.totalSamples = smp->GetTotalFrameCount();
           raw.sourceRate = smp->SampleRate;
+          // Stereo pairs are two mono samples: keep only the real channel
+          // (libgig decodes left into slot 0, right into slot 1)
+          switch(smp->SampleType)
+          {
+            case sf2::Sample::LEFT_SAMPLE:
+            case sf2::Sample::ROM_LEFT_SAMPLE:
+              raw.takeChannel = 0;
+              break;
+            case sf2::Sample::RIGHT_SAMPLE:
+            case sf2::Sample::ROM_RIGHT_SAMPLE:
+              raw.takeChannel = 1;
+              break;
+            default:
+              break;
+          }
           raw.regionIndices.push_back(regionIdx);
           seen[smp] = rawBuffers.size();
           rawBuffers.push_back(std::move(raw));
