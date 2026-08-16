@@ -257,6 +257,9 @@ private:
         m_instrumentIndex->setFont(score::Skin::instance().Medium7Pt);
         m_instrumentIndex->setPos(12. + lab->boundingRect().width(), 1.);
         m_instruments = new score::QGraphicsCombo{instrumentNames(), cell};
+        // Instrument names are long (bank presets, sampled articulations):
+        // give the combo more room than the default slider width
+        m_instruments->setRect({0., 0., 180., m_instruments->boundingRect().height()});
         m_instruments->setPos(10., 12.);
         const int idx = m_model.instrument();
         if(idx >= 0 && idx < m_instruments->array.size())
