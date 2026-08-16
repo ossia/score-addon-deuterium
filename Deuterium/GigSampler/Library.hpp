@@ -21,8 +21,10 @@ class LibraryHandler final
 
   QSet<QString> acceptedFiles() const noexcept override
   {
-    return {"gig", "dls", "sf2",  "xml", "kmp",
-            "wav", "flac", "ogg", "aiff", "aif", "mp3"};
+    return {
+        "gig", "dls", "sf2", "xml", "kmp",
+        //        "wav", "flac", "ogg", "aiff", "aif", "mp3"
+    };
   }
 
   Library::CategoryPaths categories;
