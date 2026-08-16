@@ -234,16 +234,11 @@ private:
     auto* main = b.start<score::GraphicsVBoxLayout>(nullptr, 4.);
     main->setBrush(skin.Background2.darker);
 
-    // Header strip: MIDI port, file chooser, instrument, bank name
+    // Header strip: file chooser and instrument (the MIDI port itself is
+    // already drawn by score's default node chrome)
     {
       auto* header = b.start<score::GraphicsHBoxLayout>(main, 4.);
       header->setBrush(skin.Background2.darker300);
-      if(!m_model.inlets().empty())
-      {
-        auto midi = b.makePort(*m_model.inlets().front());
-        if(midi.container)
-          midi.container->setParentItem(header);
-      }
       b.control(header, Gig::File);
 
       // Instrument chooser: a combo listing the file's instruments, driving
@@ -377,7 +372,7 @@ private:
     return p == Metadata<ConcreteKey_k, ProcessModel>::get();
   }
 
-  std::optional<double> recommendedHeight() const noexcept override { return 280.; }
+  std::optional<double> recommendedHeight() const noexcept override { return 292.; }
 
   score::ResizeableItem* makeItem(
       const Process::ProcessModel& proc, const Process::Context& ctx,
