@@ -106,11 +106,11 @@ private:
   }
 
   static constexpr double header_h = 12.;
-  static constexpr double key_w = 8., key_h = 39., black_h = 23., label_h = 8.;
+  static constexpr double key_w = 8., key_h = 51., black_h = 30., label_h = 8.;
   static constexpr double pad_gap = 2.;
   // The pads area never grows below this: rows and pad size are chosen to
   // fit, so nothing is drawn outside the widget
-  static constexpr double body_budget = 56.;
+  static constexpr double body_budget = 70.;
 
   double padTarget() const noexcept { return m_names.isEmpty() ? 26. : 52.; }
 
@@ -131,7 +131,7 @@ private:
       const double w = std::clamp(
           (m_availW - (perRow + 1) * pad_gap) / perRow, 8., padTarget() * 1.6);
       const double h
-          = std::clamp((body_budget - (rows + 1) * pad_gap) / rows, 8., 26.);
+          = std::clamp((body_budget - (rows + 1) * pad_gap) / rows, 8., 32.);
       const double score = std::min(w, h * 2.); // favor readable widths
       if(score > bestScore)
       {
