@@ -17,6 +17,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QDirIterator>
 #include <QProcess>
 
@@ -296,7 +297,12 @@ int main(int argc, char** argv)
 
       Result r;
       r.file = file;
-      if(!proc.waitForFinished(timeoutSecs * 1000))
+      // Huge multi-instrument banks (1 GB gigs, 128-preset GM soundfonts)
+      // legitimately take much longer: every preset's sample set is decoded
+      // and resampled. Scale the budget with the file size.
+      const qint64 mb = QFileInfo{file}.size() / (1024 * 1024);
+      const int budgetSecs = std::max<int>(timeoutSecs, (int)(mb * 5));
+      if(!proc.waitForFinished(budgetSecs * 1000))
       {
         proc.kill();
         proc.waitForFinished(5000);
