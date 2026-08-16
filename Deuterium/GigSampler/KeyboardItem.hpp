@@ -108,27 +108,38 @@ private:
   static constexpr double header_h = 12.;
   static constexpr double key_w = 8., key_h = 39., black_h = 23., label_h = 8.;
   static constexpr double pad_gap = 2.;
+  // The pads area never grows below this: rows and pad size are chosen to
+  // fit, so nothing is drawn outside the widget
+  static constexpr double body_budget = 56.;
 
-  // Pads fill the available width: rows wrap when full, and the pad width
-  // stretches so a full row spans the panel exactly. Named pads (drum kits)
-  // aim wider so the sound name stays readable.
   double padTarget() const noexcept { return m_names.isEmpty() ? 26. : 52.; }
-  int padsPerRow() const noexcept
+
+  // Row/size layout maximizing pad readability inside availW x body_budget
+  struct PadGrid
   {
-    const int fit
-        = (int)std::floor((m_availW - pad_gap) / (padTarget() + pad_gap));
+    int perRow{1}, rows{1};
+    double w{26.}, h{22.};
+  };
+  PadGrid padGrid() const noexcept
+  {
+    PadGrid best;
     const int n = std::max<int>(1, (int)m_pads.size());
-    return std::clamp(fit, 1, n);
-  }
-  double padW() const noexcept
-  {
-    const int perRow = padsPerRow();
-    return std::clamp(
-        (m_availW - (perRow + 1) * pad_gap) / perRow, 10., padTarget() * 1.6);
-  }
-  double padH() const noexcept
-  {
-    return std::min(m_names.isEmpty() ? 22. : 26., padW());
+    double bestScore = -1.;
+    for(int rows = 1; rows <= 4; rows++)
+    {
+      const int perRow = (n + rows - 1) / rows;
+      const double w = std::clamp(
+          (m_availW - (perRow + 1) * pad_gap) / perRow, 8., padTarget() * 1.6);
+      const double h
+          = std::clamp((body_budget - (rows + 1) * pad_gap) / rows, 8., 26.);
+      const double score = std::min(w, h * 2.); // favor readable widths
+      if(score > bestScore)
+      {
+        bestScore = score;
+        best = {perRow, rows, w, h};
+      }
+    }
+    return best;
   }
 
   static bool isBlack(int note) noexcept
@@ -174,10 +185,8 @@ private:
   {
     if(m_mode == Mode::Pads)
     {
-      const int perRow = padsPerRow();
-      const int rows
-          = m_pads.empty() ? 1 : int((m_pads.size() + perRow - 1) / perRow);
-      return rows * (padH() + pad_gap) + pad_gap;
+      const auto g = padGrid();
+      return g.rows * (g.h + pad_gap) + pad_gap;
     }
     return key_h + label_h;
   }
@@ -196,11 +205,11 @@ private:
 
   QRectF padRect(std::size_t i) const noexcept
   {
-    const int perRow = padsPerRow();
-    const int col = int(i % perRow), row = int(i / perRow);
-    const double w = padW(), h = padH();
+    const auto g = padGrid();
+    const int col = int(i % g.perRow), row = int(i / g.perRow);
     return {
-        pad_gap + col * (w + pad_gap), header_h + pad_gap + row * (h + pad_gap), w, h};
+        pad_gap + col * (g.w + pad_gap), header_h + pad_gap + row * (g.h + pad_gap),
+        g.w, g.h};
   }
 
   // Flush-left mode selector, styled like the Enum widgets (clickable text)
@@ -225,7 +234,10 @@ private:
 
     if(m_mode == Mode::Pads)
     {
-      const bool labels = padW() >= 18.;
+      const auto grid = padGrid();
+      const bool labels = grid.w >= 18.;
+      // The corner note number needs vertical room next to the name
+      const bool cornerNumbers = grid.h >= 20.;
       const QFontMetricsF fm{skin.Medium7Pt};
       for(std::size_t i = 0; i < m_pads.size(); i++)
       {
@@ -244,16 +256,19 @@ private:
         if(const auto it = m_names.constFind(note); it != m_names.constEnd())
         {
           // The sound's name front and centre, the note number small in the
-          // top-left corner
+          // top-left corner when the pad is tall enough
           p->drawText(
-              r.adjusted(1., 6., -1., 0.),
+              r.adjusted(1., cornerNumbers ? 6. : 0., -1., 0.),
               fm.elidedText(*it, Qt::ElideRight, r.width() - 2.),
               QTextOption(Qt::AlignCenter));
-          if(note != m_pressed)
-            p->setPen(skin.Gray.main.pen1);
-          p->drawText(
-              QRectF{r.x() + 2., r.y() + 1., r.width() - 3., 8.}, noteName(note),
-              QTextOption(Qt::AlignLeft));
+          if(cornerNumbers)
+          {
+            if(note != m_pressed)
+              p->setPen(skin.Gray.main.pen1);
+            p->drawText(
+                QRectF{r.x() + 2., r.y() + 1., r.width() - 3., 8.}, noteName(note),
+                QTextOption(Qt::AlignLeft));
+          }
         }
         else
         {
