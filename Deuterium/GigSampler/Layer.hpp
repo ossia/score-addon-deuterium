@@ -147,6 +147,7 @@ public:
       , m_ctx{ctx}
   {
     build();
+    refresh();
     // The user may be interacting with one of the widgets when a load
     // finishes: never tear the tree down at runtime, update it in place.
     connect(&model, &ProcessModel::fileChanged, this, [this] { refresh(); });
@@ -161,6 +162,15 @@ private:
       const int idx = m_model.instrument();
       if(idx >= 0 && idx < m_instruments->array.size())
         m_instruments->setValue(idx);
+    }
+    if(m_instrumentIndex)
+    {
+      std::size_t count = 0;
+      if(auto gi = m_model.gigInfo())
+        count = gi->instruments.size();
+      m_instrumentIndex->setText(
+          count > 1 ? QStringLiteral("%1/%2").arg(m_model.instrument() + 1).arg(count)
+                    : QString{});
     }
     updateKeyboard();
   }
@@ -245,6 +255,12 @@ private:
         auto* lab = b.makeLabel("Instrument");
         lab->setParentItem(cell);
         lab->setPos(10., 0.);
+        // Bank position indicator ("3/17"): some banks name every
+        // instrument identically. Hidden for single-instrument files.
+        m_instrumentIndex
+            = new score::SimpleTextItem{score::Skin::instance().Gray.main, cell};
+        m_instrumentIndex->setFont(score::Skin::instance().Medium7Pt);
+        m_instrumentIndex->setPos(12. + lab->boundingRect().width(), 1.);
         m_instruments = new score::QGraphicsCombo{instrumentNames(), cell};
         m_instruments->setPos(10., 12.);
         const int idx = m_model.instrument();
@@ -341,6 +357,7 @@ private:
   const ProcessModel& m_model;
   const Process::Context& m_ctx;
   score::QGraphicsCombo* m_instruments{};
+  score::SimpleTextItem* m_instrumentIndex{};
   KeyboardItem* m_keyboard{};
 };
 

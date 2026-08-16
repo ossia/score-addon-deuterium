@@ -64,11 +64,9 @@ public:
       lo = 48;
       hi = 72;
     }
-    m_lo = (lo / 12) * 12;
-    m_hi = std::min(127, ((hi / 12) + 1) * 12);
-    // Keep the strip compact: at most six octaves shown
-    if(m_hi - m_lo > 72)
-      m_hi = m_lo + 72;
+    m_rawLo = lo;
+    m_rawHi = hi;
+    computeWindow();
     m_mode = preferPads && !m_pads.empty() ? Mode::Pads : Mode::Keys;
     update();
   }
@@ -84,10 +82,29 @@ public:
   {
     prepareGeometryChange();
     m_availW = std::max(120., w);
+    computeWindow();
     update();
   }
 
 private:
+  // Shown octave window: whole octaves fitting the available width. A range
+  // wider than that is windowed around middle C (or the range's centre), so
+  // full-range GM banks show the musical middle instead of the lowest keys.
+  void computeWindow()
+  {
+    m_lo = (m_rawLo / 12) * 12;
+    m_hi = std::min(127, ((m_rawHi / 12) + 1) * 12);
+    const int maxOct = std::clamp((int)(m_availW / key_w) / 7, 2, 10);
+    if(m_hi - m_lo > maxOct * 12)
+    {
+      const int c = (m_rawLo <= 60 && 60 <= m_rawHi) ? 60 : (m_rawLo + m_rawHi) / 2;
+      int wlo = ((c - maxOct * 6) / 12) * 12;
+      wlo = std::clamp(wlo, m_lo, m_hi - maxOct * 12);
+      m_lo = std::max(0, wlo);
+      m_hi = m_lo + maxOct * 12;
+    }
+  }
+
   static constexpr double header_h = 12.;
   static constexpr double key_w = 8., key_h = 39., black_h = 23., label_h = 8.;
   static constexpr double pad_gap = 2.;
@@ -254,7 +271,7 @@ private:
         continue;
       const auto r = keyRect(n);
       QBrush fill
-          = m_mapped[n] ? skin.Base4.lighter180.brush : skin.Emphasis2.main.brush;
+          = m_mapped[n] ? skin.HalfLight.main.brush : skin.Emphasis2.main.brush;
       if(n == m_pressed)
         fill = skin.Base4.main.brush;
       p->setPen(skin.Background2.darker300.pen1);
@@ -390,6 +407,7 @@ private:
   QHash<int, QString> m_names;
   std::vector<int> m_pads;
   double m_availW{480.};
+  int m_rawLo{48}, m_rawHi{72};
   int m_lo{48}, m_hi{72};
   int m_pressed{-1};
   Mode m_mode{Mode::Keys};
