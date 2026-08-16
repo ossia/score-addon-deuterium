@@ -138,8 +138,6 @@ target_link_libraries(
     score_lib_base score_plugin_engine score_plugin_media
 
   PRIVATE
-
-    $<BUILD_INTERFACE:dspfilters>
 )
 
 setup_score_plugin(${PROJECT_NAME})
