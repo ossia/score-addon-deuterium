@@ -24,6 +24,15 @@ if(NOT TARGET Catch2::Catch2WithMain)
   return()
 endif()
 
+# The tests compile the loader directly and need score's compiled libraries
+# (e.g. Media::AudioDecoder); external-addon builds only have header-only
+# INTERFACE stand-ins, whose undefined symbols an executable cannot carry.
+get_target_property(_deut_media_type score_plugin_media TYPE)
+if(_deut_media_type STREQUAL "INTERFACE_LIBRARY")
+  message(STATUS "score-addon-deuterium: no score binaries (external build), skipping tests")
+  return()
+endif()
+
 set(DEUTERIUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
 # The addon's symbols are not exported, so the tested sources are compiled
