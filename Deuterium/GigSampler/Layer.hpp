@@ -377,7 +377,7 @@ private:
     return p == Metadata<ConcreteKey_k, ProcessModel>::get();
   }
 
-  std::optional<double> recommendedHeight() const noexcept override { return 270.; }
+  std::optional<double> recommendedHeight() const noexcept override { return 280.; }
 
   score::ResizeableItem* makeItem(
       const Process::ProcessModel& proc, const Process::Context& ctx,
