@@ -181,7 +181,7 @@ private:
       return;
     std::bitset<128> mapped;
     QHash<int, QString> names;
-    int singleKey = 0, total = 0;
+    int singleKey = 0, total = 0, rootTracksKey = 0;
     if(auto gi = m_model.gigInfo())
     {
       if(gi->selectedInstrument >= 0
@@ -194,15 +194,31 @@ private:
           for(int k = r.keyLow; k <= (int)r.keyHigh && k < 128; k++)
             mapped.set(k);
           total++;
-          singleKey += r.keyLow == r.keyHigh;
-          if(!r.noteLabel.empty() && r.keyLow == r.keyHigh)
-            names.insert(r.keyLow, QString::fromStdString(r.noteLabel));
+          if(r.keyLow == r.keyHigh)
+          {
+            singleKey++;
+            // A chromatic multisample's sample roots follow the keys (one
+            // region per key, root at or near it); drum regions keep a
+            // fixed root far from most of their keys.
+            const int delta = int(r.keyLow) - int(r.sample.midiUnityNote)
+                              + (int)std::lround(r.pitchOffset);
+            if(r.pitchTrack && std::abs(delta) <= 12)
+              rootTracksKey++;
+            if(!r.noteLabel.empty())
+              names.insert(r.keyLow, QString::fromStdString(r.noteLabel));
+          }
         }
       }
     }
-    // Kits map one note per region: default to pads there
-    m_keyboard->setMapped(
-        mapped, total > 0 && singleKey * 2 > total, std::move(names));
+    // Kits: mostly single-key regions, not chromatically rooted, and no
+    // more elements than any real kit (library survey: the largest
+    // Hydrogen kit has 82). Named elements are always a kit.
+    const int mappedCount = (int)mapped.count();
+    const bool chromatic = rootTracksKey * 10 >= singleKey * 9;
+    const bool pads = !names.isEmpty()
+                      || (total > 0 && singleKey * 2 > total && !chromatic
+                          && mappedCount <= 82);
+    m_keyboard->setMapped(mapped, pads, std::move(names));
   }
 
   QStringList instrumentNames() const
