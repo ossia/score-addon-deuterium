@@ -113,12 +113,7 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
     v[c] = new Process::FloatSlider{min, max, init, name, id(c), parent};
   };
   const auto time = [&](int c, float min, float max, float init, const QString& name) {
-    auto* tc = new Process::TimeChooser{min, max, init, name, id(c), parent};
-    // The stock TimeChooser defaults to tempo-synced; these controls default
-    // to their historical free-running time in seconds.
-    tc->setValue(ossia::vec2f{init, 0.f});
-    tc->setInit(tc->value());
-    v[c] = tc;
+    v[c] = new Process::TimeChooser{min, max, init, name, id(c), parent};
   };
   const auto combo
       = [&](int c, std::vector<std::pair<QString, ossia::value>> alts, int init,
