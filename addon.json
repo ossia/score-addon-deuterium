@@ -1,0 +1,11 @@
+{
+  "src": "<url to the .zip file created by the release script>",
+  "name": "Deuterium",
+  "raw_name": "score-addon-deuterium",
+  "version": "1.0",
+  "kind": "addon",
+  "short": "Deuterium drum machine",
+  "long": "Plays back Hydrogen / Deuterium drum kits and patterns.",
+  "small": "https://raw.githubusercontent.com/OSSIA/score-addon-tutorial/master/Deployment/icon.png",
+  "key": "dddc3f7e-a879-4c86-b180-d90b7d456356"
+}
