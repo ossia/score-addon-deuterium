@@ -1,5 +1,6 @@
 // Unit tests for Deuterium::Gig::ProcessModel: construction must never throw
 // and the file path must survive serialization even when the file is missing.
+#include <Process/Dataflow/Port.hpp>
 #include <Process/Dataflow/PortFactory.hpp>
 #include <Process/TimeValue.hpp>
 
@@ -271,4 +272,53 @@ TEST_CASE("model: instrument_port_sync", "[deuterium]")
 
   // And the legacy-document append path gives the toggle+port sensible
   // defaults (checked in released_deuterium_document_loads via ControlCount)
+}
+
+// Switching instrument while a load is running must stop it. Without this the
+// old load kept one of the two-to-four TaskPool threads busy decoding samples
+// nobody wanted, and then published them over the instrument just asked for.
+TEST_CASE("model: starting a load cancels the one in flight", "[deuterium]")
+{
+  bootApp();
+  Deuterium::Gig::ProcessModel p{
+      TimeVal::fromMsecs(1000), "/nonexistent/dir/missing.gig",
+      Id<Process::ProcessModel>{1}, nullptr};
+
+  p.loadFile("/nonexistent/dir/a.gig", 0);
+  auto first = p.currentLoadToken();
+  REQUIRE(first);
+  CHECK_FALSE(first->load(std::memory_order_relaxed));
+
+  p.loadFile("/nonexistent/dir/b.gig", 0);
+  auto second = p.currentLoadToken();
+  REQUIRE(second);
+
+  // The one that was running is told to stop, and the new one is its own.
+  CHECK(first->load(std::memory_order_relaxed));
+  CHECK(first != second);
+  CHECK_FALSE(second->load(std::memory_order_relaxed));
+}
+
+TEST_CASE("model: switching instrument cancels the load in flight", "[deuterium]")
+{
+  bootApp();
+  Deuterium::Gig::ProcessModel p{
+      TimeVal::fromMsecs(1000), "/nonexistent/dir/missing.gig",
+      Id<Process::ProcessModel>{1}, nullptr};
+
+  p.loadFile("/nonexistent/dir/a.gig", 0);
+  auto first = p.currentLoadToken();
+  REQUIRE(first);
+  CHECK_FALSE(first->load(std::memory_order_relaxed));
+
+  // Drive the port the instrument combo drives, which reaches startAsyncLoad
+  // directly rather than through loadFile.
+  auto* inlet = safe_cast<Process::ControlInlet*>(
+      p.inlets()[1 + Deuterium::Gig::Instrument]);
+  REQUIRE(inlet);
+  inlet->setValue(1);
+
+  CHECK(p.instrument() == 1);
+  CHECK(first->load(std::memory_order_relaxed));
+  CHECK(p.currentLoadToken() != first);
 }

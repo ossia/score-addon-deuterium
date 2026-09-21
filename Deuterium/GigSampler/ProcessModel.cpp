@@ -150,9 +150,15 @@ void ProcessModel::loadFile(const QString& path, int instrument)
 
 void ProcessModel::startAsyncLoad()
 {
+  // Whatever is in flight is for a file or an instrument nobody is waiting for
+  // any more. Stopping it matters twice over: it holds one of the two or four
+  // TaskPool threads decoding samples that will be thrown away, and it would
+  // otherwise still land its result on top of the one being asked for now.
+  if(m_cancelToken)
+    m_cancelToken->store(true, std::memory_order_relaxed);
+
   auto rate = score::AppContext().settings<Audio::Settings::Model>().getRate();
 
-  // Create a new cancellation token for this load
   auto cancelToken = std::make_shared<std::atomic<bool>>(false);
   m_cancelToken = cancelToken;
 

@@ -48,6 +48,14 @@ public:
 
   std::shared_ptr<GigFileInfo> gigInfo() const noexcept { return m_gigInfo; }
 
+  //! Cancellation flag of the load currently in flight, if any. Starting
+  //! another load sets it, which is how a switch away from a half-loaded
+  //! instrument stops paying for it.
+  std::shared_ptr<const std::atomic<bool>> currentLoadToken() const noexcept
+  {
+    return m_cancelToken;
+  }
+
   std::unique_ptr<Process::Inlet> midi_in;
   std::unique_ptr<Process::Outlet> audio_out;
 

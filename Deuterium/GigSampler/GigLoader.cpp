@@ -160,6 +160,53 @@ struct ConvertedSample
   double ratio{1.0};
   uint32_t rate{44100};
 };
+//! Polyphase windowed-sinc table, cached per thread.
+//!
+//! It depends only on the cutoff, which follows the resampling ratio -- the
+//! same for every sample of a bank at a given engine rate. Rebuilding it per
+//! sample cost around 50k transcendental calls each time, which dominated the
+//! load of a large kit.
+static const std::vector<double>&
+resamplingKernel(double cutoff, int taps, int half, int phases)
+{
+  thread_local std::vector<double> kernel;
+  thread_local double cachedCutoff = -1.;
+  thread_local int cachedTaps = 0;
+  thread_local int cachedPhases = 0;
+
+  if(cutoff == cachedCutoff && taps == cachedTaps && phases == cachedPhases)
+    return kernel;
+
+  kernel.assign((phases + 1) * taps, 0.);
+  for(int ph = 0; ph <= phases; ph++)
+  {
+    const double frac = (double)ph / phases;
+    double sum = 0.;
+    for(int t = 0; t < taps; t++)
+    {
+      const double dist = (t - half + 1) - frac; // tap offset from srcPos
+      const double x = dist * cutoff;
+      const double sinc = x == 0. ? 1. : std::sin(M_PI * x) / (M_PI * x);
+      const double wArg = dist / half;
+      const double w = std::abs(wArg) >= 1.
+                           ? 0.
+                           : 0.42 + 0.5 * std::cos(M_PI * wArg)
+                                 + 0.08 * std::cos(2. * M_PI * wArg);
+      kernel[ph * taps + t] = cutoff * sinc * w;
+      sum += kernel[ph * taps + t];
+    }
+    // Unity DC gain per phase (kills fractional-position gain ripple)
+    if(sum > 1e-9)
+      for(int t = 0; t < taps; t++)
+        kernel[ph * taps + t] /= sum;
+  }
+
+  cachedCutoff = cutoff;
+  cachedTaps = taps;
+  cachedPhases = phases;
+  return kernel;
+}
+
 ConvertedSample convertRawSampleData(
     const void* rawData, int64_t rawSize, int channels, int bitDepth,
     int64_t totalSamples, uint32_t sourceRate, int targetRate,
@@ -302,29 +349,8 @@ ConvertedSample convertRawSampleData(
       constexpr int half = taps / 2;
       constexpr int phases = 512;
       const double cutoff = 0.90 * std::min(1.0, ratio); // rel. source Nyquist
-      std::vector<double> kernel((phases + 1) * taps);
-      for(int ph = 0; ph <= phases; ph++)
-      {
-        const double frac = (double)ph / phases;
-        double sum = 0.;
-        for(int t = 0; t < taps; t++)
-        {
-          const double dist = (t - half + 1) - frac; // tap offset from srcPos
-          const double x = dist * cutoff;
-          const double sinc = x == 0. ? 1. : std::sin(M_PI * x) / (M_PI * x);
-          const double wArg = dist / half;
-          const double w = std::abs(wArg) >= 1.
-                               ? 0.
-                               : 0.42 + 0.5 * std::cos(M_PI * wArg)
-                                     + 0.08 * std::cos(2. * M_PI * wArg);
-          kernel[ph * taps + t] = cutoff * sinc * w;
-          sum += kernel[ph * taps + t];
-        }
-        // Unity DC gain per phase (kills fractional-position gain ripple)
-        if(sum > 1e-9)
-          for(int t = 0; t < taps; t++)
-            kernel[ph * taps + t] /= sum;
-      }
+      const std::vector<double>& kernel
+          = resamplingKernel(cutoff, taps, half, phases);
 
       auto resampled = std::make_shared<ossia::audio_array>();
       resampled->resize(outChannels);
