@@ -10,7 +10,10 @@
 #include <QTemporaryDir>
 #include "TestHelpers.hpp"
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
+#include <thread>
 #include <vector>
 
 using namespace Deuterium::Gig;
@@ -98,6 +101,52 @@ QString makeGigFile(
   // Sample data can only be written once the chunks exist on disk
   smp->SetPos(0);
   smp->Write(data.data(), FRAMES);
+
+  return path;
+}
+
+// A gig with one instrument whose regions each carry their own sample, so a
+// single load has `samples` independent raw buffers to convert. Sample n is
+// filled with a distinct waveform, so a converted buffer landing on the
+// wrong region is visible.
+QString makeMultiSampleGigFile(
+    const QString& path, int samples, int frames, uint32_t sampleRate = RATE)
+{
+  gig::File f;
+  f.pInfo->Name = "MultiBank";
+
+  gig::Instrument* ins = f.AddInstrument();
+  ins->pInfo->Name = "Multi";
+
+  std::vector<gig::Sample*> smps;
+  for(int s = 0; s < samples; s++)
+  {
+    gig::Sample* smp = f.AddSample();
+    smp->pInfo->Name = "S" + std::to_string(s);
+    smp->Channels = 1;
+    smp->BitDepth = 16;
+    smp->FrameSize = 2;
+    smp->SamplesPerSecond = sampleRate;
+    smp->MIDIUnityNote = 60;
+    smp->Resize(frames);
+    smps.push_back(smp);
+
+    gig::Region* rgn = ins->AddRegion();
+    rgn->SetKeyRange(s, s);
+    rgn->SetSample(smp);
+    rgn->pDimensionRegions[0]->pSample = smp;
+  }
+
+  f.Save(path.toStdString());
+
+  for(int s = 0; s < samples; s++)
+  {
+    std::vector<int16_t> data(frames);
+    for(int i = 0; i < frames; i++)
+      data[i] = int16_t((i * 37 + s * 911) % 30000 - 15000);
+    smps[s]->SetPos(0);
+    smps[s]->Write(data.data(), frames);
+  }
 
   return path;
 }
@@ -216,10 +265,9 @@ void genRange(QByteArray& b, uint16_t op, uint8_t lo, uint8_t hi)
 }
 
 // Writes a mono 16-bit PCM WAV with the ramp data
-void writeWavFile(const QString& path)
+void writeWavFile(const QString& path, std::vector<int16_t> data = rampData())
 {
   using namespace sf2writer;
-  auto data = rampData();
 
   QByteArray fmt;
   u16(fmt, 1); // PCM
@@ -1103,3 +1151,212 @@ TEST_CASE("loader: sf2", "[deuterium]")
   for(int i : {0, 50, FRAMES - 1})
     REQUIRE(std::abs((*sample.data)[0][i] - ramp[i] / 32768.0) < 1e-9);
 }
+
+/////////////////////////////
+// Loader caches and parallel conversion
+/////////////////////////////
+
+// Constructing a gig::File scans the compressed data of every sample in the
+// bank, so parsing it once per phase and once more per instrument switch is
+// what made switching instrument inside a bank slow.
+TEST_CASE("loader: bank_is_parsed_once_per_file", "[deuterium]")
+{
+  const auto path = makeGigFile(tmp("bankcache.gig"), {}, 0, 0, 3);
+
+  clearLoaderCaches();
+  const auto before = loaderCacheStats();
+
+  auto first = loadGigFileMetadata(path, 0);
+  REQUIRE(first);
+  REQUIRE(loadGigFileSamples(first, RATE, {}));
+
+  const auto afterFirst = loaderCacheStats();
+  REQUIRE(approxEq(afterFirst.bankParses - before.bankParses, uint64_t(1)));
+
+  // Switching instrument inside the bank must not re-parse it
+  for(int instrument : {1, 2})
+  {
+    auto info = loadGigFileMetadata(path, instrument);
+    REQUIRE(info);
+    REQUIRE(approxEq(info->selectedInstrument, instrument));
+    auto loaded = loadGigFileSamples(info, RATE, {});
+    REQUIRE(loaded);
+    REQUIRE(approxEq(loaded->instruments[instrument].regions.size(), std::size_t(1)));
+  }
+
+  const auto after = loaderCacheStats();
+  REQUIRE(approxEq(after.bankParses, afterFirst.bankParses));
+  REQUIRE(after.bankHits - afterFirst.bankHits >= 4);
+}
+
+TEST_CASE("loader: bank_cache_invalidated_when_file_changes", "[deuterium]")
+{
+  const auto path = tmp("bankstale.gig");
+  makeGigFile(path, {}, 0, 0, 1);
+
+  clearLoaderCaches();
+  auto first = loadGigFileMetadata(path);
+  REQUIRE(first);
+  REQUIRE(approxEq(first->instruments.size(), std::size_t(1)));
+  const auto afterFirst = loaderCacheStats();
+
+  QFile::remove(path);
+  makeGigFile(path, {}, 0, 0, 3);
+
+  auto second = loadGigFileMetadata(path);
+  REQUIRE(second);
+  REQUIRE(approxEq(second->instruments.size(), std::size_t(3)));
+  REQUIRE(loaderCacheStats().bankParses > afterFirst.bankParses);
+}
+
+// A drumkit of plain PCM wavs used to run a full libav open + find_stream_info
+// + avcodec_open2 + one SwrContext per channel per layer.
+TEST_CASE("loader: wav_drumkit_layers_skip_libav", "[deuterium]")
+{
+  const auto path = makeHydrogenKit(tmp("drwavkit"));
+
+  clearLoaderCaches();
+  const auto before = loaderCacheStats();
+
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+
+  const auto after = loaderCacheStats();
+  // kick_soft, kick_hard and snare
+  REQUIRE(approxEq(after.audioDecodes - before.audioDecodes, uint64_t(3)));
+  REQUIRE(approxEq(after.drwavDecodes - before.drwavDecodes, uint64_t(3)));
+  REQUIRE(approxEq(after.libavDecodes, before.libavDecodes));
+
+  auto ramp = rampData();
+  for(auto& region : loaded->instruments[0].regions)
+  {
+    REQUIRE((region.sample.data && !region.sample.data->empty()));
+    const auto& channel = (*region.sample.data)[0];
+    REQUIRE(approxEq(channel.size(), std::size_t(FRAMES)));
+    for(int i : {0, 50, FRAMES - 1})
+      REQUIRE(std::abs(channel[i] - ramp[i] / 32768.f) < 1e-6f);
+  }
+}
+
+TEST_CASE("loader: decoded_audio_is_reused_across_loads", "[deuterium]")
+{
+  const auto dirPath = tmp("audiocachekit");
+  const auto path = makeHydrogenKit(dirPath);
+
+  clearLoaderCaches();
+  auto first = loadGigFileSamples(loadGigFileMetadata(path), RATE, {});
+  REQUIRE(first);
+  const auto afterFirst = loaderCacheStats();
+
+  auto second = loadGigFileSamples(loadGigFileMetadata(path), RATE, {});
+  REQUIRE(second);
+  const auto afterSecond = loaderCacheStats();
+
+  // Nothing read from disk again, and the two loads share the same buffers
+  REQUIRE(approxEq(afterSecond.audioDecodes, afterFirst.audioDecodes));
+  REQUIRE(afterSecond.audioHits > afterFirst.audioHits);
+  for(std::size_t i = 0; i < first->instruments[0].regions.size(); i++)
+    REQUIRE(approxEq(
+        first->instruments[0].regions[i].sample.data.get(),
+        second->instruments[0].regions[i].sample.data.get()));
+
+  // Rewriting a layer with different content of the same length: only the
+  // modification time moves, and the next load must still see the new audio
+  std::vector<int16_t> inverted(FRAMES);
+  for(int i = 0; i < FRAMES; i++)
+    inverted[i] = int16_t(-i * 16);
+  writeWavFile(dirPath + "/kick_soft.wav", inverted);
+
+  auto third = loadGigFileSamples(loadGigFileMetadata(path), RATE, {});
+  REQUIRE(third);
+  auto& before = *first->instruments[0].regions[0].sample.data;
+  auto& after = *third->instruments[0].regions[0].sample.data;
+  REQUIRE(approxEq(before[0].size(), after[0].size()));
+  REQUIRE(std::abs(after[0][50] - inverted[50] / 32768.f) < 1e-6f);
+  REQUIRE(after[0][50] != before[0][50]);
+}
+
+// The conversion of the raw sample buffers fans out over several threads
+// once there is enough data; the samples it produces must not depend on how
+// many threads ran.
+TEST_CASE("loader: parallel_conversion_matches_sequential", "[deuterium]")
+{
+  constexpr int frames = 40000;
+  const auto few = makeMultiSampleGigFile(tmp("convseq.gig"), 2, frames);
+  const auto many = makeMultiSampleGigFile(tmp("convpar.gig"), 16, frames);
+
+  clearLoaderCaches();
+  const auto before = loaderCacheStats();
+
+  // Loaded at a rate the files are not in, so the resampler runs too
+  auto sequential = loadGigFileSamples(loadGigFileMetadata(few), 48000, {});
+  REQUIRE(sequential);
+  const auto afterSequential = loaderCacheStats();
+  REQUIRE(approxEq(afterSequential.parallelConversions, before.parallelConversions));
+
+  auto parallel = loadGigFileSamples(loadGigFileMetadata(many), 48000, {});
+  REQUIRE(parallel);
+  REQUIRE(loaderCacheStats().parallelConversions > afterSequential.parallelConversions);
+
+  // The first two samples of both banks hold the same waveform: whatever the
+  // thread count, they must convert to the same bits
+  const auto& seqRegions = sequential->instruments[0].regions;
+  const auto& parRegions = parallel->instruments[0].regions;
+  REQUIRE(approxEq(seqRegions.size(), std::size_t(2)));
+  REQUIRE(approxEq(parRegions.size(), std::size_t(16)));
+  for(std::size_t r = 0; r < seqRegions.size(); r++)
+  {
+    REQUIRE(approxEq(seqRegions[r].keyLow, parRegions[r].keyLow));
+    const auto& a = (*seqRegions[r].sample.data)[0];
+    const auto& b = (*parRegions[r].sample.data)[0];
+    REQUIRE(approxEq(a.size(), b.size()));
+    REQUIRE(a.size() > std::size_t(frames));
+    for(std::size_t i = 0; i < a.size(); i++)
+      REQUIRE(a[i] == b[i]);
+  }
+
+  // Every region got its own waveform, not a neighbour's
+  for(std::size_t r = 1; r < parRegions.size(); r++)
+    REQUIRE((*parRegions[r].sample.data)[0][100] != (*parRegions[0].sample.data)[0][100]);
+}
+
+// Cancelling once the fan-out is under way must abandon the load, not let it
+// run to completion.
+TEST_CASE("loader: parallel_conversion_is_cancellable", "[deuterium]")
+{
+  const auto path = makeMultiSampleGigFile(tmp("cancelpar.gig"), 8, 500000);
+
+  clearLoaderCaches();
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+
+  auto token = std::make_shared<std::atomic<bool>>(false);
+  const auto beforeConversions = loaderCacheStats().parallelConversions;
+  std::thread canceller{[&] {
+    while(loaderCacheStats().parallelConversions == beforeConversions)
+      std::this_thread::yield();
+    token->store(true, std::memory_order_relaxed);
+  }};
+
+  auto loaded = loadGigFileSamples(info, 48000, token);
+  canceller.join();
+  REQUIRE(!loaded);
+}
+
+TEST_CASE("loader: cancelled_drumkit_decodes_nothing", "[deuterium]")
+{
+  const auto path = makeHydrogenKit(tmp("cancelkit"));
+
+  clearLoaderCaches();
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+
+  const auto before = loaderCacheStats();
+  auto token = std::make_shared<std::atomic<bool>>(true);
+  REQUIRE(!loadGigFileSamples(info, RATE, token));
+  const auto after = loaderCacheStats();
+  REQUIRE(approxEq(after.audioDecodes, before.audioDecodes));
+}
+

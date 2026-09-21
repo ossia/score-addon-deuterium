@@ -185,4 +185,23 @@ std::shared_ptr<GigFileInfo> loadGigFileSamples(
     int targetRate,
     const std::shared_ptr<std::atomic<bool>>& cancelled);
 
+// Monotonic counters for the two loader caches (parsed bank files, decoded
+// external audio files). The tests read them to check that a cache hits and
+// that it is invalidated when the file on disk changes.
+struct LoaderCacheStats
+{
+  uint64_t bankParses{};   // bank files handed to libgig
+  uint64_t bankHits{};     // bank parses served from the cache
+  uint64_t audioDecodes{}; // audio files read from disk
+  uint64_t audioHits{};    // audio decodes served from the cache
+  uint64_t drwavDecodes{}; // of the decodes, the ones that took the mmap path
+  uint64_t libavDecodes{}; // of the decodes, the ones that went through libav
+  uint64_t parallelConversions{}; // sample conversions that fanned out
+};
+LoaderCacheStats loaderCacheStats();
+
+// Drops everything both caches hold. Only needed by the tests: the caches
+// are bounded and invalidate themselves on mtime/size changes.
+void clearLoaderCaches();
+
 }
