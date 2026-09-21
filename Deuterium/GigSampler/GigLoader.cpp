@@ -1,6 +1,7 @@
 #include "GigLoader.hpp"
 
 #include <Media/AudioDecoder.hpp>
+#include <Media/MediaFileHandle.hpp>
 
 #include <QDir>
 #include <QDirIterator>
@@ -17,6 +18,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
+#include <filesystem>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <unordered_map>
 
 namespace Deuterium::Gig
@@ -74,6 +80,169 @@ SampleFileFormat formatForPath(const QString& filePath)
     }
   }
   return extFormat();
+}
+
+/////////////////////////////
+// Cache identity and counters
+/////////////////////////////
+
+struct LoaderCounters
+{
+  std::atomic<uint64_t> bankParses{};
+  std::atomic<uint64_t> bankHits{};
+  std::atomic<uint64_t> audioDecodes{};
+  std::atomic<uint64_t> audioHits{};
+  std::atomic<uint64_t> drwavDecodes{};
+  std::atomic<uint64_t> libavDecodes{};
+  std::atomic<uint64_t> parallelConversions{};
+};
+LoaderCounters& counters()
+{
+  static LoaderCounters c;
+  return c;
+}
+
+// Identity of a file on disk: everything cached here is keyed on the path
+// plus this, so a bank or a sample edited under score is re-read.
+struct FileStamp
+{
+  int64_t size{-1};
+  int64_t mtime{-1};
+  bool valid() const noexcept { return size >= 0; }
+  friend bool operator==(const FileStamp&, const FileStamp&) noexcept = default;
+};
+
+FileStamp stampOf(const QString& path)
+{
+#if defined(_WIN32)
+  const std::filesystem::path p{path.toStdWString()};
+#else
+  const std::filesystem::path p{QFile::encodeName(path).toStdString()};
+#endif
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(p, ec);
+  if(ec)
+    return {};
+  const auto mtime = std::filesystem::last_write_time(p, ec);
+  if(ec)
+    return {};
+  return {(int64_t)size, (int64_t)mtime.time_since_epoch().count()};
+}
+
+/////////////////////////////
+// Parsed bank cache
+/////////////////////////////
+
+// One parsed bank file. The format-specific objects all borrow the RIFF
+// file, so they must be declared after it (destruction runs in reverse).
+struct ParsedBank
+{
+  std::string path;
+  FileStamp stamp;
+  SampleFileFormat format{};
+  std::unique_ptr<RIFF::File> riff;
+  std::unique_ptr<gig::File> gig;
+  std::unique_ptr<DLS::File> dls;
+  std::unique_ptr<sf2::File> sf2;
+};
+
+struct BankCache
+{
+  std::mutex mutex;
+  std::deque<std::unique_ptr<ParsedBank>> entries; // most recent first
+};
+BankCache& bankCache()
+{
+  static BankCache c;
+  return c;
+}
+
+// Two is enough for the operation this exists for -- switching instrument
+// inside one bank, where the metadata phase, the sample phase and the next
+// switch all want the same file -- while bounding how much parsed bank
+// metadata stays resident.
+constexpr std::size_t kMaxCachedBanks = 2;
+
+// Keeps the libgig lock for its lifetime: the bank it points to may only be
+// touched while it is alive.
+struct BankHandle
+{
+  std::unique_lock<std::mutex> lock;
+  std::unique_ptr<ParsedBank> owned; // set when the bank is not cached
+  ParsedBank* bank{};
+
+  ParsedBank* operator->() const noexcept { return bank; }
+};
+
+// libgig carries process-global mutable state -- gig::Sample's shared
+// decompression buffer and the non-atomic instance counters that own it --
+// so every libgig object, from parsing to sample reads to destruction,
+// lives under this one lock. Serialising that is affordable precisely
+// because the cache removes the repeated parses: constructing a gig::File
+// scans the compressed data of every sample in the file, which is what made
+// switching instrument inside a bank slow.
+//
+// `keep` is false for the library scanner: it walks thousands of files once
+// and must not evict the bank the user is playing.
+BankHandle openBank(const QString& path, SampleFileFormat format, bool keep)
+{
+  auto& cache = bankCache();
+  BankHandle h{std::unique_lock{cache.mutex}};
+
+  const auto p = path.toStdString();
+  const auto stamp = stampOf(path);
+  auto& entries = cache.entries;
+
+  for(auto it = entries.begin(); it != entries.end(); ++it)
+  {
+    if((*it)->path != p)
+      continue;
+    if((*it)->stamp == stamp && (*it)->format == format && stamp.valid())
+    {
+      auto hit = std::move(*it);
+      entries.erase(it);
+      h.bank = hit.get();
+      entries.push_front(std::move(hit));
+      counters().bankHits.fetch_add(1, std::memory_order_relaxed);
+      return h;
+    }
+    entries.erase(it); // the file changed underneath us
+    break;
+  }
+
+  auto e = std::make_unique<ParsedBank>();
+  e->path = p;
+  e->stamp = stamp;
+  e->format = format;
+  e->riff = std::make_unique<RIFF::File>(p);
+  switch(format)
+  {
+    case SampleFileFormat::Dls:
+      e->dls = std::make_unique<DLS::File>(e->riff.get());
+      break;
+    case SampleFileFormat::Sf2:
+      e->sf2 = std::make_unique<sf2::File>(e->riff.get());
+      break;
+    case SampleFileFormat::Gig:
+      e->gig = std::make_unique<gig::File>(e->riff.get());
+      break;
+    default:
+      break;
+  }
+  counters().bankParses.fetch_add(1, std::memory_order_relaxed);
+
+  h.bank = e.get();
+  if(keep && stamp.valid())
+  {
+    entries.push_front(std::move(e));
+    while(entries.size() > kMaxCachedBanks)
+      entries.pop_back();
+  }
+  else
+  {
+    h.owned = std::move(e);
+  }
+  return h;
 }
 
 // Envelope stage lengths end up as playback state: keep them finite and sane
@@ -207,6 +376,77 @@ resamplingKernel(double cutoff, int taps, int half, int phases)
   return kernel;
 }
 
+// Resamples decoded audio to targetRate in place-ish (the input is consumed).
+// Shared by the bank formats and by the external audio file decoders.
+ConvertedSample
+resampleArray(ossia::audio_array&& input, uint32_t sourceRate, int targetRate)
+{
+  ConvertedSample result;
+  const int outChannels = (int)input.size();
+  const int64_t totalSamples = outChannels > 0 ? (int64_t)input[0].size() : 0;
+
+  // Never trust the header sample rate: 0 would divide to an infinite ratio
+  // below (with an UB float->int cast), and absurd values would make the
+  // resampled allocation explode
+  if(sourceRate < 4000 || sourceRate > 768000)
+    sourceRate = (uint32_t)targetRate;
+  result.rate = sourceRate;
+
+  auto arr = std::make_shared<ossia::audio_array>(std::move(input));
+  if(totalSamples > 0 && sourceRate != (uint32_t)targetRate && targetRate > 0)
+  {
+    const double ratio = (double)targetRate / (double)sourceRate;
+    const int64_t newLen = (int64_t)(totalSamples * ratio);
+    // The upper bound caps the resampled buffer at 2 GB per channel
+    if(newLen > 0 && newLen < (int64_t(1) << 28))
+    {
+      // Windowed-sinc resampling through a polyphase kernel table:
+      // flat passband and real alias rejection on downsampling, unlike
+      // linear interpolation. Runs on the loader thread, never on the
+      // audio thread.
+      constexpr int taps = 32;
+      constexpr int half = taps / 2;
+      constexpr int phases = 512;
+      const double cutoff = 0.90 * std::min(1.0, ratio); // rel. source Nyquist
+      const std::vector<double>& kernel
+          = resamplingKernel(cutoff, taps, half, phases);
+
+      auto resampled = std::make_shared<ossia::audio_array>();
+      resampled->resize(outChannels);
+      for(int c = 0; c < outChannels; c++)
+      {
+        (*resampled)[c].resize(newLen);
+        const auto& src = (*arr)[c];
+        for(int64_t i = 0; i < newLen; i++)
+        {
+          const double srcPos = i / ratio;
+          const int64_t idx = (int64_t)srcPos;
+          const int ph
+              = (int)std::lround((srcPos - idx) * phases); // 0..phases
+          const double* k = &kernel[ph * taps];
+          double acc = 0.;
+          for(int t = 0; t < taps; t++)
+          {
+            const int64_t j = idx - half + 1 + t;
+            if(j >= 0 && j < totalSamples)
+              acc += src[j] * k[t];
+          }
+          (*resampled)[c][i] = acc;
+        }
+        // The source channel is dead once it is resampled: releasing it
+        // here halves the peak footprint of a large bank
+        (*arr)[c] = {};
+      }
+      arr = std::move(resampled);
+      result.ratio = ratio;
+      result.rate = (uint32_t)targetRate;
+    }
+  }
+
+  result.data = std::move(arr);
+  return result;
+}
+
 ConvertedSample convertRawSampleData(
     const void* rawData, int64_t rawSize, int channels, int bitDepth,
     int64_t totalSamples, uint32_t sourceRate, int targetRate,
@@ -232,8 +472,7 @@ ConvertedSample convertRawSampleData(
   if(totalSamples <= 0)
     return result;
 
-  auto arr = std::make_shared<ossia::audio_array>();
-  auto& out_data = *arr;
+  ossia::audio_array out_data;
   out_data.resize(outChannels);
   for(auto& ch : out_data)
     ch.resize(totalSamples);
@@ -326,63 +565,248 @@ ConvertedSample convertRawSampleData(
     }
   }
 
-  // Never trust the header sample rate: 0 would divide to an infinite ratio
-  // below (with an UB float->int cast), and absurd values would make the
-  // resampled allocation explode
-  if(sourceRate < 4000 || sourceRate > 768000)
-    sourceRate = (uint32_t)targetRate;
-  result.rate = sourceRate;
+  return resampleArray(std::move(out_data), sourceRate, targetRate);
+}
 
-  // Resample to target rate if needed
-  if(sourceRate != (uint32_t)targetRate && targetRate > 0)
+/////////////////////////////
+// External audio files (drumkit layers, KORG-less formats)
+/////////////////////////////
+
+struct DecodedAudioFile
+{
+  std::shared_ptr<ossia::audio_array> data;
+  uint32_t rate{};
+};
+
+struct AudioCacheEntry
+{
+  std::string path;
+  FileStamp stamp;
+  int targetRate{};
+  uint32_t rate{};
+  std::size_t bytes{};
+  std::shared_ptr<ossia::audio_array> data;
+};
+
+struct AudioCache
+{
+  std::mutex mutex;
+  std::deque<AudioCacheEntry> entries; // most recent first
+  std::size_t bytes{};
+};
+AudioCache& audioCache()
+{
+  static AudioCache c;
+  return c;
+}
+
+// A drumkit is a few tens of megabytes; this holds a handful of them so that
+// re-picking a kit, or two processes playing the same one, decode nothing.
+constexpr std::size_t kMaxCachedAudioBytes = 256ull * 1024 * 1024;
+
+std::optional<DecodedAudioFile>
+cachedAudio(const std::string& path, const FileStamp& stamp, int targetRate)
+{
+  if(!stamp.valid())
+    return std::nullopt;
+
+  auto& c = audioCache();
+  std::lock_guard lock{c.mutex};
+  for(auto it = c.entries.begin(); it != c.entries.end(); ++it)
   {
-    const double ratio = (double)targetRate / (double)sourceRate;
-    const int64_t newLen = (int64_t)(totalSamples * ratio);
-    // The upper bound caps the resampled buffer at 2 GB per channel
-    if(newLen > 0 && newLen < (int64_t(1) << 28))
+    if(it->path != path || it->targetRate != targetRate)
+      continue;
+    if(it->stamp == stamp)
     {
-      // Windowed-sinc resampling through a polyphase kernel table:
-      // flat passband and real alias rejection on downsampling, unlike
-      // linear interpolation. Runs on the loader thread, never on the
-      // audio thread.
-      constexpr int taps = 32;
-      constexpr int half = taps / 2;
-      constexpr int phases = 512;
-      const double cutoff = 0.90 * std::min(1.0, ratio); // rel. source Nyquist
-      const std::vector<double>& kernel
-          = resamplingKernel(cutoff, taps, half, phases);
-
-      auto resampled = std::make_shared<ossia::audio_array>();
-      resampled->resize(outChannels);
-      for(int c = 0; c < outChannels; c++)
-      {
-        (*resampled)[c].resize(newLen);
-        const auto& src = out_data[c];
-        for(int64_t i = 0; i < newLen; i++)
-        {
-          const double srcPos = i / ratio;
-          const int64_t idx = (int64_t)srcPos;
-          const int ph
-              = (int)std::lround((srcPos - idx) * phases); // 0..phases
-          const double* k = &kernel[ph * taps];
-          double acc = 0.;
-          for(int t = 0; t < taps; t++)
-          {
-            const int64_t j = idx - half + 1 + t;
-            if(j >= 0 && j < totalSamples)
-              acc += src[j] * k[t];
-          }
-          (*resampled)[c][i] = acc;
-        }
-      }
-      arr = std::move(resampled);
-      result.ratio = ratio;
-      result.rate = (uint32_t)targetRate;
+      auto hit = std::move(*it);
+      c.entries.erase(it);
+      DecodedAudioFile res{hit.data, hit.rate};
+      c.entries.push_front(std::move(hit));
+      counters().audioHits.fetch_add(1, std::memory_order_relaxed);
+      return res;
     }
+    c.bytes -= it->bytes;
+    c.entries.erase(it); // the file changed underneath us
+    break;
+  }
+  return std::nullopt;
+}
+
+void cacheAudio(
+    std::string path, const FileStamp& stamp, int targetRate,
+    const DecodedAudioFile& decoded)
+{
+  if(!stamp.valid() || !decoded.data)
+    return;
+
+  std::size_t bytes = 0;
+  for(const auto& ch : *decoded.data)
+    bytes += ch.size() * sizeof(ossia::audio_sample);
+  if(bytes > kMaxCachedAudioBytes)
+    return;
+
+  auto& c = audioCache();
+  std::lock_guard lock{c.mutex};
+  // Two loads of the same file can race to decode it; keep one entry
+  std::erase_if(c.entries, [&](const AudioCacheEntry& e) {
+    if(e.path != path || e.targetRate != targetRate)
+      return false;
+    c.bytes -= e.bytes;
+    return true;
+  });
+
+  c.entries.push_front({std::move(path), stamp, targetRate, decoded.rate, bytes,
+                        decoded.data});
+  c.bytes += bytes;
+  while(c.bytes > kMaxCachedAudioBytes && c.entries.size() > 1)
+  {
+    c.bytes -= c.entries.back().bytes;
+    c.entries.pop_back();
+  }
+}
+
+// Plain PCM wav/w64 already at the engine rate are read with dr_wav over a
+// memory mapping, which skips libav's per-file demuxer, decoder and
+// per-channel resampler setup. The mapping is faulted in and dropped here,
+// on the loader thread: what the engine gets is an ossia::audio_array like
+// every other path.
+//
+// A rate mismatch sends the file back to libav, the same gate
+// Media::needsDecoding applies: swr converts the rate for free inside the
+// decode, where the windowed-sinc resampler below would cost several times
+// what the decode saves.
+std::optional<DecodedAudioFile> decodeWithDrwav(
+    const QString& path, int targetRate,
+    const std::shared_ptr<std::atomic<bool>>& cancelled)
+{
+  QFile f{path};
+  if(!f.open(QIODevice::ReadOnly))
+    return std::nullopt;
+  const auto size = f.size();
+  if(size <= 0)
+    return std::nullopt;
+  uchar* const map = f.map(0, size);
+  if(!map)
+    return std::nullopt;
+
+  struct Unmapper
+  {
+    QFile& file;
+    uchar* addr;
+    ~Unmapper() { file.unmap(addr); }
+  } unmapper{f, map};
+
+  ossia::drwav_handle h;
+  h.open_memory(map, (std::size_t)size);
+  // open_memory() does not report a failed init: dr_wav leaves a zeroed
+  // handle for the wav containers it cannot read
+  if(!h)
+    return std::nullopt;
+  const auto channels = h.channels();
+  const auto rate = h.sampleRate();
+  const auto frames = (int64_t)h.totalPCMFrameCount();
+  if(channels == 0 || rate == 0 || frames <= 0 || rate != (uint32_t)targetRate)
+    return std::nullopt;
+  switch(h.translatedFormatTag())
+  {
+    case DR_WAVE_FORMAT_PCM:
+    case DR_WAVE_FORMAT_IEEE_FLOAT:
+    case DR_WAVE_FORMAT_ALAW:
+    case DR_WAVE_FORMAT_MULAW:
+      break;
+    default:
+      // DTS, GSM and the ADPCM flavours dr_wav declines are all legal in a
+      // wav container: leave those to libav
+      return std::nullopt;
   }
 
-  result.data = std::move(arr);
-  return result;
+  ossia::audio_array out;
+  out.resize(channels);
+  for(auto& ch : out)
+    ch.resize(frames);
+
+  // Chunked, so that a long file still polls the cancel token; the frame
+  // count follows the channel count so that the interleaved staging buffer
+  // stays cache-sized whatever the header claims
+  const int64_t chunkFrames = std::clamp<int64_t>(65536 / channels, 1, 8192);
+  std::vector<float> interleaved(chunkFrames * channels);
+  int64_t pos = 0;
+  while(pos < frames)
+  {
+    if(cancelled && cancelled->load(std::memory_order_relaxed))
+      return std::nullopt;
+
+    const int64_t want = std::min(chunkFrames, frames - pos);
+    const int64_t got = (int64_t)h.read_pcm_frames_f32(want, interleaved.data());
+    if(got <= 0)
+      break;
+
+    for(int64_t i = 0; i < got; i++)
+    {
+      for(uint32_t c = 0; c < channels; c++)
+      {
+        // Float wavs can legitimately carry NaN / inf, and a NaN sticks in
+        // the engine's filters forever
+        const float v = interleaved[i * channels + c];
+        out[c][pos + i] = std::isfinite(v) ? v : 0.f;
+      }
+    }
+    pos += got;
+  }
+  if(pos < frames) // truncated file
+    for(auto& ch : out)
+      ch.resize(pos);
+  if(pos <= 0)
+    return std::nullopt;
+
+  return DecodedAudioFile{
+      std::make_shared<ossia::audio_array>(std::move(out)), rate};
+}
+
+std::optional<DecodedAudioFile> decodeAudioFile(
+    const QString& path, int targetRate,
+    const std::shared_ptr<std::atomic<bool>>& cancelled)
+{
+  const auto suffix = QFileInfo(path).suffix().toLower();
+  if(suffix == "wav" || suffix == "w64")
+  {
+    if(auto decoded = decodeWithDrwav(path, targetRate, cancelled))
+    {
+      counters().drwavDecodes.fetch_add(1, std::memory_order_relaxed);
+      return decoded;
+    }
+    if(cancelled && cancelled->load(std::memory_order_relaxed))
+      return std::nullopt;
+  }
+
+  auto dec = Media::AudioDecoder::decode_synchronous(path, targetRate);
+  if(!dec)
+    return std::nullopt;
+  counters().libavDecodes.fetch_add(1, std::memory_order_relaxed);
+
+  auto arr = std::make_shared<ossia::audio_array>(std::move(dec->second));
+  for(auto& channel : *arr)
+    for(auto& sample : channel)
+      if(!std::isfinite(sample))
+        sample = 0.;
+  return DecodedAudioFile{std::move(arr), (uint32_t)targetRate};
+}
+
+std::optional<DecodedAudioFile> loadAudioFile(
+    const QString& path, int targetRate,
+    const std::shared_ptr<std::atomic<bool>>& cancelled)
+{
+  auto key = path.toStdString();
+  const auto stamp = stampOf(path);
+  if(auto hit = cachedAudio(key, stamp, targetRate))
+    return hit;
+
+  counters().audioDecodes.fetch_add(1, std::memory_order_relaxed);
+  auto decoded = decodeAudioFile(path, targetRate, cancelled);
+  if(!decoded)
+    return std::nullopt;
+  cacheAudio(std::move(key), stamp, targetRate, *decoded);
+  return decoded;
 }
 
 // Convert each unique source sample once, share the decoded audio between
@@ -393,23 +817,91 @@ void convertAndPrune(
     int targetRate, const std::shared_ptr<std::atomic<bool>>& cancelled,
     bool& wasCancelled)
 {
-  // Done sequentially here because this function already runs on a
-  // TaskPool worker — posting back to the same pool and busy-waiting
-  // would risk deadlock, and returning early on cancellation while
-  // posted tasks still reference our locals would be use-after-free.
   wasCancelled = false;
-  for(auto& raw : rawBuffers)
+
+  // Converting a raw buffer reads only that buffer and writes only its own
+  // ConvertedSample, so the buffers fan out cleanly. The workers are plain
+  // threads rather than TaskPool tasks: this function already runs on a
+  // TaskPool worker, and posting back into the same pool and waiting is the
+  // deadlock the sequential version was avoiding.
+  std::vector<ConvertedSample> converted(rawBuffers.size());
   {
-    if(cancelled && cancelled->load(std::memory_order_relaxed))
+    std::size_t totalBytes = 0;
+    for(const auto& raw : rawBuffers)
+      totalBytes += raw.data.size();
+
+    std::atomic<std::size_t> next{0};
+    std::atomic<bool> aborted{false};
+    const auto work = [&] {
+      for(std::size_t i = next.fetch_add(1, std::memory_order_relaxed);
+          i < rawBuffers.size(); i = next.fetch_add(1, std::memory_order_relaxed))
+      {
+        if(aborted.load(std::memory_order_relaxed)
+           || (cancelled && cancelled->load(std::memory_order_relaxed)))
+        {
+          aborted.store(true, std::memory_order_relaxed);
+          return;
+        }
+
+        auto& raw = rawBuffers[i];
+        try
+        {
+          converted[i] = convertRawSampleData(
+              raw.data.data(), raw.data.size(), raw.channels, raw.bitDepth,
+              raw.totalSamples, raw.sourceRate, targetRate, raw.signed8,
+              raw.takeChannel);
+        }
+        catch(...)
+        {
+          // Out of memory on a hostile header: give up on the whole load
+          // rather than let the exception cross a thread boundary
+          aborted.store(true, std::memory_order_relaxed);
+          return;
+        }
+        raw.data = {}; // the source bytes are dead once converted
+      }
+    };
+
+    // Small banks are not worth the thread handshake; the threshold is in
+    // bytes because it is the conversion, not the buffer count, that costs.
+    constexpr std::size_t kParallelThreshold = 1024 * 1024;
+    const unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+    const std::size_t workers
+        = (rawBuffers.size() < 2 || totalBytes < kParallelThreshold)
+              ? 1
+              : std::min<std::size_t>({rawBuffers.size(), hw, 8});
+
+    if(workers > 1)
+      counters().parallelConversions.fetch_add(1, std::memory_order_relaxed);
+
+    std::vector<std::thread> helpers;
+    helpers.reserve(workers - 1);
+    try
+    {
+      for(std::size_t w = 1; w < workers; w++)
+        helpers.emplace_back(work);
+    }
+    catch(...)
+    {
+      // Out of threads: the ones that did start share the same queue, and
+      // this thread takes the rest. Letting the exception out here would
+      // unwind past helpers still reading these locals.
+    }
+    work();
+    for(auto& t : helpers)
+      t.join();
+
+    if(aborted.load(std::memory_order_relaxed))
     {
       wasCancelled = true;
       return;
     }
+  }
 
-    const auto conv = convertRawSampleData(
-        raw.data.data(), raw.data.size(), raw.channels, raw.bitDepth,
-        raw.totalSamples, raw.sourceRate, targetRate, raw.signed8,
-        raw.takeChannel);
+  for(std::size_t i = 0; i < rawBuffers.size(); i++)
+  {
+    const auto& raw = rawBuffers[i];
+    const auto& conv = converted[i];
     if(!conv.data || conv.data->empty() || (*conv.data)[0].empty())
       continue;
     const int64_t frames = (int64_t)(*conv.data)[0].size();
@@ -499,11 +991,8 @@ bool gigZoneIsUnselected(const gig::Region* rgn, uint32_t d)
 }
 
 std::shared_ptr<GigFileInfo>
-loadMetadata_gig(const QString& filePath, int instrumentIndex)
+loadMetadata_gig(const QString& filePath, gig::File* gigFile, int instrumentIndex)
 {
-  auto riff = std::make_unique<RIFF::File>(filePath.toStdString());
-  auto gigFile = std::make_unique<gig::File>(riff.get());
-
   auto info = std::make_shared<GigFileInfo>();
   info->filePath = filePath.toStdString();
 
@@ -684,12 +1173,10 @@ loadMetadata_gig(const QString& filePath, int instrumentIndex)
 // Phase 2a: read all raw sample data with libgig (single-threaded, libgig is
 // not thread-safe). The walk order must match loadMetadata_gig exactly.
 bool collectRawBuffers_gig(
-    const GigFileInfo& info, std::vector<RawSampleBuffer>& rawBuffers,
+    const GigFileInfo& info, gig::File* gigFile,
+    std::vector<RawSampleBuffer>& rawBuffers,
     const std::shared_ptr<std::atomic<bool>>& cancelled)
 {
-  auto riff = std::make_unique<RIFF::File>(info.filePath);
-  auto gigFile = std::make_unique<gig::File>(riff.get());
-
   gig::Instrument* gigInstr = gigFile->GetInstrument(info.selectedInstrument);
   if(!gigInstr)
     return false;
@@ -734,8 +1221,8 @@ bool collectRawBuffers_gig(
         if(buf.pStart && buf.Size > 0)
         {
           RawSampleBuffer raw;
-          raw.data.resize(buf.Size);
-          std::memcpy(raw.data.data(), buf.pStart, buf.Size);
+          const auto* bytes = static_cast<const uint8_t*>(buf.pStart);
+          raw.data.assign(bytes, bytes + buf.Size);
           raw.channels = smp->Channels;
           raw.bitDepth = smp->BitDepth;
           raw.totalSamples = smp->SamplesTotal;
@@ -852,11 +1339,8 @@ void applyDlsArticulations(DLS::Articulator& art, GigRegion& region)
 }
 
 std::shared_ptr<GigFileInfo>
-loadMetadata_dls(const QString& filePath, int instrumentIndex)
+loadMetadata_dls(const QString& filePath, DLS::File* dlsFile, int instrumentIndex)
 {
-  auto riff = std::make_unique<RIFF::File>(filePath.toStdString());
-  auto dlsFile = std::make_unique<DLS::File>(riff.get());
-
   auto info = std::make_shared<GigFileInfo>();
   info->filePath = filePath.toStdString();
 
@@ -953,12 +1437,10 @@ loadMetadata_dls(const QString& filePath, int instrumentIndex)
 
 // Walk order must match loadMetadata_dls exactly.
 bool collectRawBuffers_dls(
-    const GigFileInfo& info, std::vector<RawSampleBuffer>& rawBuffers,
+    const GigFileInfo& info, DLS::File* dlsFile,
+    std::vector<RawSampleBuffer>& rawBuffers,
     const std::shared_ptr<std::atomic<bool>>& cancelled)
 {
-  auto riff = std::make_unique<RIFF::File>(info.filePath);
-  auto dlsFile = std::make_unique<DLS::File>(riff.get());
-
   DLS::Instrument* dlsInstr = dlsFile->GetFirstInstrument();
   for(int i = 0; i < info.selectedInstrument && dlsInstr; i++)
     dlsInstr = dlsFile->GetNextInstrument();
@@ -992,8 +1474,8 @@ bool collectRawBuffers_dls(
       if(bytes > 0)
       {
         RawSampleBuffer raw;
-        raw.data.resize(bytes);
-        std::memcpy(raw.data.data(), p, bytes);
+        const auto* src = static_cast<const uint8_t*>(p);
+        raw.data.assign(src, src + bytes);
         raw.channels = smp->Channels;
         raw.bitDepth = smp->BitDepth;
         raw.totalSamples = smp->SamplesTotal;
@@ -1029,11 +1511,8 @@ uint8_t frequencyToVcfCutoff(double freq)
 }
 
 std::shared_ptr<GigFileInfo>
-loadMetadata_sf2(const QString& filePath, int instrumentIndex)
+loadMetadata_sf2(const QString& filePath, sf2::File* sfFile, int instrumentIndex)
 {
-  auto riff = std::make_unique<RIFF::File>(filePath.toStdString());
-  auto sfFile = std::make_unique<sf2::File>(riff.get());
-
   auto info = std::make_shared<GigFileInfo>();
   info->filePath = filePath.toStdString();
 
@@ -1238,12 +1717,10 @@ loadMetadata_sf2(const QString& filePath, int instrumentIndex)
 
 // Walk order must match loadMetadata_sf2 exactly.
 bool collectRawBuffers_sf2(
-    const GigFileInfo& info, std::vector<RawSampleBuffer>& rawBuffers,
+    const GigFileInfo& info, sf2::File* sfFile,
+    std::vector<RawSampleBuffer>& rawBuffers,
     const std::shared_ptr<std::atomic<bool>>& cancelled)
 {
-  auto riff = std::make_unique<RIFF::File>(info.filePath);
-  auto sfFile = std::make_unique<sf2::File>(riff.get());
-
   sf2::Preset* preset = sfFile->GetPreset(info.selectedInstrument);
   if(!preset)
     return false;
@@ -1296,8 +1773,8 @@ bool collectRawBuffers_sf2(
         if(buf.pStart && buf.Size > 0)
         {
           RawSampleBuffer raw;
-          raw.data.resize(buf.Size);
-          std::memcpy(raw.data.data(), buf.pStart, buf.Size);
+          const auto* bytes = static_cast<const uint8_t*>(buf.pStart);
+          raw.data.assign(bytes, bytes + buf.Size);
           raw.channels = smp->GetChannelCount();
           raw.bitDepth
               = smp->GetChannelCount() > 0
@@ -1626,7 +2103,6 @@ bool loadSamples_hydrogen(
     const std::shared_ptr<std::atomic<bool>>& cancelled)
 {
   auto& destInstr = info.instruments[info.selectedInstrument];
-  std::unordered_map<std::string, std::shared_ptr<ossia::audio_array>> cache;
   for(auto& region : destInstr.regions)
   {
     if(cancelled && cancelled->load(std::memory_order_relaxed))
@@ -1634,31 +2110,16 @@ bool loadSamples_hydrogen(
     if(region.sample.sourceFile.empty())
       continue;
 
-    if(auto it = cache.find(region.sample.sourceFile); it != cache.end())
-    {
-      region.sample.data = it->second;
-      region.sample.sampleRate = targetRate;
-      continue;
-    }
-
     try
     {
-      auto dec = Media::AudioDecoder::decode_synchronous(
-          QString::fromStdString(region.sample.sourceFile), targetRate);
-      if(dec)
+      // Layers sharing a file, and kits loaded again later, both come back
+      // out of the decoded-file cache
+      if(auto dec = loadAudioFile(
+             QString::fromStdString(region.sample.sourceFile), targetRate,
+             cancelled))
       {
-        auto arr = std::make_shared<ossia::audio_array>(std::move(dec->second));
-
-        // Float audio files can legitimately contain NaN / inf samples; they
-        // must never reach the audio thread (a NaN sticks in the filters)
-        for(auto& channel : *arr)
-          for(auto& sample : channel)
-            if(!std::isfinite(sample))
-              sample = 0.;
-
-        cache[region.sample.sourceFile] = arr;
-        region.sample.data = std::move(arr);
-        region.sample.sampleRate = targetRate;
+        region.sample.data = std::move(dec->data);
+        region.sample.sampleRate = dec->rate;
       }
     }
     catch(...)
@@ -1832,8 +2293,8 @@ bool collectRawBuffers_korg(
       if(buf.pStart && buf.Size > 0)
       {
         RawSampleBuffer raw;
-        raw.data.resize(buf.Size);
-        std::memcpy(raw.data.data(), buf.pStart, buf.Size);
+        const auto* bytes = static_cast<const uint8_t*>(buf.pStart);
+        raw.data.assign(bytes, bytes + buf.Size);
         raw.channels = std::max<int>(1, ksf.Channels);
         raw.bitDepth = ksf.BitDepth;
         raw.signed8 = true; // Korg 8-bit samples are signed
@@ -1947,17 +2408,19 @@ std::vector<std::string> listInstruments(const QString& filePath)
 
   try
   {
-    auto riff = std::make_unique<RIFF::File>(filePath.toStdString());
+    // The library scanner walks a whole sample collection once: it reads a
+    // warm bank but must not push thousands of files through the cache.
+    auto bank = openBank(filePath, format, false);
     switch(format)
     {
       case SampleFileFormat::Dls: {
-        auto f = std::make_unique<DLS::File>(riff.get());
+        auto* f = bank->dls.get();
         for(auto* in = f->GetFirstInstrument(); in; in = f->GetNextInstrument())
           names.push_back(in->pInfo ? in->pInfo->Name : std::string{});
         break;
       }
       case SampleFileFormat::Sf2: {
-        auto f = std::make_unique<sf2::File>(riff.get());
+        auto* f = bank->sf2.get();
         for(int i = 0, n = f->GetPresetCount(); i < n; i++)
         {
           auto* p = f->GetPreset(i);
@@ -1966,7 +2429,7 @@ std::vector<std::string> listInstruments(const QString& filePath)
         break;
       }
       case SampleFileFormat::Gig: {
-        auto f = std::make_unique<gig::File>(riff.get());
+        auto* f = bank->gig.get();
         for(auto* in = f->GetFirstInstrument(); in; in = f->GetNextInstrument())
           names.push_back(in->pInfo ? in->pInfo->Name : std::string{});
         break;
@@ -2010,20 +2473,30 @@ loadGigFileMetadata(const QString& filePath, int instrumentIndex)
 {
   try
   {
-    switch(formatForPath(filePath))
+    const auto format = formatForPath(filePath);
+    switch(format)
     {
-      case SampleFileFormat::Dls:
-        return loadMetadata_dls(filePath, instrumentIndex);
-      case SampleFileFormat::Sf2:
-        return loadMetadata_sf2(filePath, instrumentIndex);
       case SampleFileFormat::Hydrogen:
         return loadMetadata_hydrogen(filePath, instrumentIndex);
       case SampleFileFormat::Korg:
         return loadMetadata_korg(filePath, instrumentIndex);
       case SampleFileFormat::AudioFile:
         return loadMetadata_audiofile(filePath);
+      default:
+        break;
+    }
+
+    auto bank = openBank(filePath, format, true);
+    switch(format)
+    {
+      case SampleFileFormat::Dls:
+        return loadMetadata_dls(filePath, bank->dls.get(), instrumentIndex);
+      case SampleFileFormat::Sf2:
+        return loadMetadata_sf2(filePath, bank->sf2.get(), instrumentIndex);
       case SampleFileFormat::Gig:
-        return loadMetadata_gig(filePath, instrumentIndex);
+        return loadMetadata_gig(filePath, bank->gig.get(), instrumentIndex);
+      default:
+        break;
     }
     return {};
   }
@@ -2065,15 +2538,12 @@ std::shared_ptr<GigFileInfo> loadGigFileSamples(
     std::vector<RawSampleBuffer> rawBuffers;
     rawBuffers.reserve(info->instruments[instrIdx].regions.size());
 
+    const auto path = QString::fromStdString(info->filePath);
+    const auto format = formatForPath(path);
+
     bool ok{};
-    switch(formatForPath(QString::fromStdString(info->filePath)))
+    switch(format)
     {
-      case SampleFileFormat::Dls:
-        ok = collectRawBuffers_dls(*info, rawBuffers, cancelled);
-        break;
-      case SampleFileFormat::Sf2:
-        ok = collectRawBuffers_sf2(*info, rawBuffers, cancelled);
-        break;
       case SampleFileFormat::Hydrogen:
       case SampleFileFormat::AudioFile:
         // Decodes external audio files directly; nothing to convert, but the
@@ -2083,9 +2553,26 @@ std::shared_ptr<GigFileInfo> loadGigFileSamples(
       case SampleFileFormat::Korg:
         ok = collectRawBuffers_korg(*info, rawBuffers, cancelled);
         break;
-      case SampleFileFormat::Gig:
-        ok = collectRawBuffers_gig(*info, rawBuffers, cancelled);
+      default: {
+        // The bank the metadata phase parsed is still warm: this reads the
+        // samples out of that same gig/DLS/sf2 object.
+        auto bank = openBank(path, format, true);
+        switch(format)
+        {
+          case SampleFileFormat::Dls:
+            ok = collectRawBuffers_dls(*info, bank->dls.get(), rawBuffers, cancelled);
+            break;
+          case SampleFileFormat::Sf2:
+            ok = collectRawBuffers_sf2(*info, bank->sf2.get(), rawBuffers, cancelled);
+            break;
+          case SampleFileFormat::Gig:
+            ok = collectRawBuffers_gig(*info, bank->gig.get(), rawBuffers, cancelled);
+            break;
+          default:
+            break;
+        }
         break;
+      }
     }
     if(!ok)
       return {};
@@ -2112,6 +2599,34 @@ std::shared_ptr<GigFileInfo> loadGigFileSamples(
   {
     qWarning() << "Unknown error loading samples";
     return {};
+  }
+}
+
+LoaderCacheStats loaderCacheStats()
+{
+  const auto& c = counters();
+  return {
+      c.bankParses.load(std::memory_order_relaxed),
+      c.bankHits.load(std::memory_order_relaxed),
+      c.audioDecodes.load(std::memory_order_relaxed),
+      c.audioHits.load(std::memory_order_relaxed),
+      c.drwavDecodes.load(std::memory_order_relaxed),
+      c.libavDecodes.load(std::memory_order_relaxed),
+      c.parallelConversions.load(std::memory_order_relaxed)};
+}
+
+void clearLoaderCaches()
+{
+  {
+    auto& c = bankCache();
+    std::lock_guard lock{c.mutex};
+    c.entries.clear();
+  }
+  {
+    auto& c = audioCache();
+    std::lock_guard lock{c.mutex};
+    c.entries.clear();
+    c.bytes = 0;
   }
 }
 
