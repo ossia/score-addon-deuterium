@@ -25,17 +25,18 @@ ProcessModel::ProcessModel(
     QObject* parent)
     : Process::
           ProcessModel{duration, id, Metadata<ObjectKey_k, ProcessModel>::get(), parent}
-    , midi_in{std::make_unique<Process::MidiInlet>("MIDI In", Id<Process::Port>(0), this)}
-    , audio_out{std::make_unique<Process::AudioOutlet>(
-          "Audio Out", Id<Process::Port>(0), this)}
 {
   metadata().setInstanceName(*this);
 
-  m_inlets.push_back(midi_in.get());
+  // Ports are owned by this process through QObject parenting and listed in
+  // m_inlets / m_outlets: deserialization (writePorts) deletes and recreates
+  // them, so no other owner may hold on to them.
+  m_inlets.push_back(new Process::MidiInlet("MIDI In", Id<Process::Port>(0), this));
   for(auto* control : makeSamplerControls(this))
     m_inlets.push_back(control);
-  m_outlets.push_back(audio_out.get());
-  ((Process::AudioOutlet*)audio_out.get())->setPropagate(true);
+  auto* audio_out = new Process::AudioOutlet("Audio Out", Id<Process::Port>(0), this);
+  audio_out->setPropagate(true);
+  m_outlets.push_back(audio_out);
 
   // Empty or unparseable data yields a valid, silent process (no file loaded)
   // rather than failing construction; the path is kept so that saving the

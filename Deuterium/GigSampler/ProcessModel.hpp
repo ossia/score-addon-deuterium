@@ -56,9 +56,6 @@ public:
     return m_cancelToken;
   }
 
-  std::unique_ptr<Process::Inlet> midi_in;
-  std::unique_ptr<Process::Outlet> audio_out;
-
 private:
   void wireInstrumentControl();
   void startAsyncLoad();
