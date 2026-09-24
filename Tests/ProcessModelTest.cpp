@@ -11,10 +11,36 @@
 
 #include "TestHelpers.hpp"
 
+#include <QCoreApplication>
+
+#include <catch2/reporters/catch_reporter_event_listener.hpp>
+#include <catch2/reporters/catch_reporter_registrars.hpp>
+
 #include <Dataflow/AudioOutletItem.hpp>
 #include <Dataflow/MidiInletItem.hpp>
 #include <Deuterium/GigSampler/Controls.hpp>
 #include <Deuterium/GigSampler/ProcessModel.hpp>
+
+static score::MinimalApplication* g_app{};
+
+// The application is shared by every test case, so it is torn down once the
+// run is over, like score's own application tests do: otherwise
+// LeakSanitizer reports everything it owns (notably the JS plugin's
+// QJSEngine, whose heap LSan cannot scan) as leaked at exit.
+class AppTeardown final : public Catch::EventListenerBase
+{
+public:
+  using Catch::EventListenerBase::EventListenerBase;
+  void testRunEnded(const Catch::TestRunStats&) override
+  {
+    if(!g_app)
+      return;
+    QCoreApplication::processEvents();
+    delete g_app;
+    g_app = nullptr;
+  }
+};
+CATCH_REGISTER_LISTENER(AppTeardown)
 
 // Entity construction reaches score::AppContext() (through score::Skin), so
 // a real application context is required; MinimalApplication also loads the
@@ -27,10 +53,9 @@ static void bootApp()
        && !qEnvironmentVariableIsSet("WAYLAND_DISPLAY"))
       qputenv("QT_QPA_PLATFORM", "offscreen");
 
-    // Intentionally leaked: tearing the application down unloads every plugin,
-    // and some unrelated plugins do not survive their destructors; the process
-    // exits right after the tests anyway.
-    auto& app = *new score::MinimalApplication;
+    // Destroyed by AppTeardown once every test case has run
+    g_app = new score::MinimalApplication;
+    auto& app = *g_app;
 
     // writePorts() resolves the ports through the PortFactoryList; make sure
     // the factories exist even if the plugins were not found on disk.
