@@ -74,11 +74,13 @@ enum SamplerControl : int
   ControlCount
 };
 
-// Controls carrying a Process::TimeChooser. Their value is vec2f{x, sync}:
-// x is seconds when sync < 0.5, a fraction of a whole note otherwise —
+// Controls carrying a Process::TimeChooser. Their value is vec2f{x, mode}:
+// x is seconds when mode is 0, a fraction of a whole note otherwise --
 // resolved against the current tempo on the execution side. They also accept
 // a plain float (legacy documents, graph modulation), interpreted with the
 // control's historical unit: seconds, except LfoRate where a float is Hz.
+// 0 is a valid time: an attack of 0 starts at full level (the engine still
+// ramps over a sample where it must).
 inline constexpr bool isTimeControl(int c) noexcept
 {
   switch(c)
@@ -92,6 +94,7 @@ inline constexpr bool isTimeControl(int c) noexcept
     case Glide:
     case LfoRate:
     case LfoDelay:
+    case PitchEnvDecay:
       return true;
     default:
       return false;
@@ -131,10 +134,10 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
 
   // Only in effect when EnvFromFile is off; historical documents instead
   // carry sliders whose negative values mean "use the file's envelope".
-  time(Attack, 0.001f, 5.f, 0.001f, QStringLiteral("Attack"));
-  time(Decay, 0.001f, 5.f, 0.15f, QStringLiteral("Decay"));
+  time(Attack, 0.f, 5.f, 0.001f, QStringLiteral("Attack"));
+  time(Decay, 0.f, 5.f, 0.15f, QStringLiteral("Decay"));
   flt(Sustain, 0.f, 1.f, 1.f, QStringLiteral("Sustain"));
-  time(Release, 0.001f, 8.f, 0.05f, QStringLiteral("Release"));
+  time(Release, 0.f, 8.f, 0.05f, QStringLiteral("Release"));
 
   combo(
       FilterType,
@@ -150,10 +153,10 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
   flt(Resonance, 0.f, 1.f, 0.f, QStringLiteral("Resonance"));
   flt(FilterKeytrack, 0.f, 1.f, 0.f, QStringLiteral("Filter keytrack"));
   flt(FilterEnvAmount, -1.f, 1.f, 0.f, QStringLiteral("Filter env"));
-  time(FilterEnvAttack, 0.001f, 5.f, 0.001f, QStringLiteral("Filter env attack"));
-  time(FilterEnvDecay, 0.001f, 5.f, 0.15f, QStringLiteral("Filter env decay"));
+  time(FilterEnvAttack, 0.f, 5.f, 0.001f, QStringLiteral("Filter env attack"));
+  time(FilterEnvDecay, 0.f, 5.f, 0.15f, QStringLiteral("Filter env decay"));
   flt(FilterEnvSustain, 0.f, 1.f, 0.f, QStringLiteral("Filter env sustain"));
-  time(FilterEnvRelease, 0.001f, 8.f, 0.05f, QStringLiteral("Filter env release"));
+  time(FilterEnvRelease, 0.f, 8.f, 0.05f, QStringLiteral("Filter env release"));
   flt(VelToCutoff, 0.f, 1.f, 0.f, QStringLiteral("Vel > cutoff"));
 
   flt(VelAmount, 0.f, 1.f, 1.f, QStringLiteral("Vel > volume"));
@@ -193,7 +196,7 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
 
   flt(Lofi, 0.f, 1.f, 0.f, QStringLiteral("Lo-fi"));
   flt(PitchEnvAmount, -24.f, 24.f, 0.f, QStringLiteral("Pitch env"));
-  flt(PitchEnvDecay, 0.001f, 2.f, 0.08f, QStringLiteral("Pitch env decay"));
+  time(PitchEnvDecay, 0.f, 2.f, 0.08f, QStringLiteral("Pitch env decay"));
   flt(VelToPitchEnv, -1.f, 1.f, 0.f, QStringLiteral("Vel > pitch env"));
 
   combo(

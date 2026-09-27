@@ -515,11 +515,12 @@ TEST_CASE("engine: tempo_sync_time_resolution", "[deuterium]")
   // Tempo scales linearly
   REQUIRE(approxEq(syncTimeToSeconds(0.25f, 240.), 0.25f));
 
-  // The time controls are exactly the nine timing parameters
+  // The time controls are exactly the ten timing parameters
   int n = 0;
   for(int i = 0; i < ControlCount; i++)
     n += isTimeControl(i) ? 1 : 0;
-  REQUIRE(n == 9);
+  REQUIRE(n == 10);
+  REQUIRE(isTimeControl(PitchEnvDecay));
   REQUIRE(isTimeControl(Attack));
   REQUIRE(isTimeControl(Decay));
   REQUIRE(isTimeControl(Release));

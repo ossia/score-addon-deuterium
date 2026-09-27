@@ -193,6 +193,9 @@ public:
       case LfoDelay:
         m_params.lfoDelay = secs;
         break;
+      case PitchEnvDecay:
+        m_params.pitchEnvDecay = secs;
+        break;
       case LfoRate:
         m_params.lfoRate = 1.f / std::clamp(secs, 1e-3f, 1e3f);
         break;
