@@ -68,6 +68,8 @@ enum SamplerControl : int
   Instrument,
   File,
   VelToPitchEnv,
+  NoteOff,
+  MidiChannel,
 
   ControlCount
 };
@@ -237,6 +239,22 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
       QStringLiteral("Sample banks (*.gig *.dls *.sf2 *.kmp *.xml *.wav *.flac "
                      "*.ogg *.aiff *.aif *.mp3)"),
       QStringLiteral("File"), id(File), parent};
+
+  // Note-offs do nothing: a note plays until its sample or its envelope ends
+  // (a sampled piano fades out over its loop), or the same key is struck
+  // again.
+  v[NoteOff] = new Process::ComboBox{
+      {{QStringLiteral("Release"), false}, {QStringLiteral("Ignore"), true}}, false,
+      QStringLiteral("Note off"), id(NoteOff), parent};
+
+  // Only the messages of this channel play; "All" takes every channel.
+  {
+    std::vector<std::pair<QString, ossia::value>> channels{{QStringLiteral("All"), 0}};
+    for(int c = 1; c <= 16; c++)
+      channels.emplace_back(QString::number(c), c);
+    v[MidiChannel] = new Process::ComboBox{
+        std::move(channels), 0, QStringLiteral("MIDI channel"), id(MidiChannel), parent};
+  }
 
   return v;
 }

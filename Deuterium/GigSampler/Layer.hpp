@@ -316,12 +316,12 @@ private:
       auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
       page->setBrush(skin.Background2.main);
       b.grid(page, 5, {Volume, Pan, Transpose, FineTune, BendRange});
-      b.grid(page, 3, {Chromatic, ChromaticRoot, RoundRobin});
+      b.grid(page, 4, {Chromatic, ChromaticRoot, RoundRobin, MidiChannel});
     }
     {
       auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
       page->setBrush(skin.Background2.main);
-      b.grid(page, 3, {StartOffset, Reverse, Lofi});
+      b.grid(page, 4, {StartOffset, Reverse, Lofi, NoteOff});
       b.grid(page, 3, {LoopMode, LoopXfade, VelToStart});
     }
     {

@@ -164,6 +164,47 @@ TEST_CASE("model: released_deuterium_document_loads", "[deuterium]")
   REQUIRE(loaded2.inlets().size() == std::size_t(1 + Deuterium::Gig::ControlCount));
 }
 
+// A document saved before the Note off and MIDI channel controls: they are
+// appended with the behaviour the document was made with (note-offs release,
+// every channel plays), and a re-save keeps them.
+TEST_CASE("model: document_without_note_off_and_channel_loads", "[deuterium]")
+{
+  bootApp();
+  Deuterium::Gig::ProcessModel current{
+      TimeVal::fromMsecs(1000), "", Id<Process::ProcessModel>{21}, nullptr};
+  auto doc = toValue(
+      score::marshall<JSONObject>(static_cast<const Process::ProcessModel&>(current)));
+  auto& inlets = doc["Inlets"];
+  REQUIRE(inlets.Size() == 1 + Deuterium::Gig::ControlCount);
+  inlets.Erase(inlets.Begin() + 1 + Deuterium::Gig::NoteOff, inlets.End());
+
+  JSONObject::Deserializer des{doc};
+  Deuterium::Gig::ProcessModel loaded{des, nullptr};
+  REQUIRE(loaded.inlets().size() == std::size_t(1 + Deuterium::Gig::ControlCount));
+  auto control = [&](int c) {
+    auto* ctl = qobject_cast<Process::ControlInlet*>(loaded.inlets()[1 + c]);
+    REQUIRE(ctl);
+    return ctl;
+  };
+  CHECK(control(Deuterium::Gig::NoteOff)->value() == ossia::value{false});
+  CHECK(ossia::convert<int>(control(Deuterium::Gig::MidiChannel)->value()) == 0);
+
+  control(Deuterium::Gig::NoteOff)->setValue(true);
+  control(Deuterium::Gig::MidiChannel)->setValue(10);
+  auto doc2 = toValue(
+      score::marshall<JSONObject>(static_cast<const Process::ProcessModel&>(loaded)));
+  JSONObject::Deserializer des2{doc2};
+  Deuterium::Gig::ProcessModel loaded2{des2, nullptr};
+  auto* noteOff = qobject_cast<Process::ControlInlet*>(
+      loaded2.inlets()[1 + Deuterium::Gig::NoteOff]);
+  auto* channel = qobject_cast<Process::ControlInlet*>(
+      loaded2.inlets()[1 + Deuterium::Gig::MidiChannel]);
+  REQUIRE(noteOff);
+  REQUIRE(channel);
+  CHECK(noteOff->value() == ossia::value{true});
+  CHECK(ossia::convert<int>(channel->value()) == 10);
+}
+
 // The "<path>|<instrument>" creation string is split at construction and
 // the instrument index survives serialization as its own field, so saved
 // documents do not depend on filesystem state to parse the reference.

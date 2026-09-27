@@ -533,3 +533,73 @@ TEST_CASE("engine: tempo_sync_time_resolution", "[deuterium]")
   REQUIRE(!isTimeControl(Cutoff));
   REQUIRE(!isTimeControl(EnvFromFile));
 }
+
+// Ignored note-offs: no sustain, the decay goes on into the release by itself,
+// which still takes the release time.
+TEST_CASE("engine: amp_env_one_shot", "[deuterium]")
+{
+  constexpr double rate = 48000.;
+  auto runFor = [&](AmpEnv& env, double secs) {
+    double v = 0.;
+    for(int i = 0; i < int(secs * rate); i++)
+      v = env();
+    return v;
+  };
+
+  for(double sustain : {0.5, 1.})
+  {
+    INFO("sustain " << sustain);
+    AmpEnv env;
+    env.set_sample_rate(rate);
+    env.attack(0.001);
+    env.hold(0.);
+    env.decay(0.1);
+    env.sustain(sustain);
+    env.release(0.5);
+    env.dbMode(false);
+    env.reset();
+    env.oneShot(true);
+
+    // Attack and decay (none at a sustain of 1): releasing, for 0.5 s
+    runFor(env, 0.12);
+    REQUIRE(env.releasing());
+    REQUIRE(!env.done());
+    runFor(env, 0.25);
+    REQUIRE(!env.done());
+    runFor(env, 0.35);
+    REQUIRE(env.done());
+  }
+
+  // Without it, the envelope sustains
+  AmpEnv held;
+  held.set_sample_rate(rate);
+  held.decay(0.1);
+  held.sustain(0.5);
+  held.release(0.5);
+  held.reset();
+  runFor(held, 2.);
+  CHECK(!held.releasing());
+}
+
+// The MIDI channel filter: 0 lets every channel through, system messages
+// always pass.
+TEST_CASE("engine: midi_channel_filter", "[deuterium]")
+{
+  SamplerParams p;
+  for(int status : {0x90, 0x85, 0xBF, 0xE3})
+    CHECK(acceptsChannel(p, uint8_t(status)));
+
+  p.midiChannel = 1;
+  CHECK(acceptsChannel(p, 0x90));
+  CHECK(acceptsChannel(p, 0x80));
+  CHECK(acceptsChannel(p, 0xB0));
+  CHECK(!acceptsChannel(p, 0x91));
+  CHECK(!acceptsChannel(p, 0x8F));
+
+  p.midiChannel = 16;
+  CHECK(acceptsChannel(p, 0x9F));
+  CHECK(!acceptsChannel(p, 0x90));
+  // System messages have no channel
+  CHECK(acceptsChannel(p, 0xF8));
+  CHECK(acceptsChannel(p, 0xFF));
+}

@@ -113,7 +113,22 @@ struct SamplerParams
   // repitched by the distance to the root (MPC 16-levels / SP multipitch)
   bool chromatic{false};
   int chromaticRoot{60};
+
+  //! Note-offs do nothing: a note ends with its sample or its envelope, or
+  //! when the same key is struck again.
+  bool ignoreNoteOff{false};
+  //! 1-16: only this channel's messages play; 0: every channel.
+  int midiChannel{0};
 };
+
+//! Whether a MIDI 1 message passes the channel filter: system messages always
+//! do, channel messages when on the channel picked (or any, for 0).
+inline bool acceptsChannel(const SamplerParams& p, uint8_t status) noexcept
+{
+  if(p.midiChannel <= 0 || status < 0x80 || status >= 0xF0)
+    return true;
+  return (status & 0x0F) + 1 == p.midiChannel;
+}
 
 inline double semitonesToRatio(double st) noexcept
 {
@@ -201,10 +216,18 @@ struct AmpEnv
   void sustain(double lin) noexcept { m_sustain = std::clamp(lin, 0., 1.); }
   void release(double s) noexcept { m_release = std::max(1e-4, s); }
   void dbMode(bool b) noexcept { m_dbMode = b; }
+  //! No sustain: after the decay the envelope goes on to its release by
+  //! itself, for notes whose note-off is ignored.
+  void oneShot(bool b) noexcept { m_oneShot = b; }
+  [[nodiscard]] bool releasing() const noexcept
+  {
+    return m_stage == Release || m_stage == Done;
+  }
   void amp(double) noexcept { } // gam::ADSR API compatibility; peak is 1
 
   void reset() noexcept
   {
+    m_oneShot = false;
     m_stage = Delay;
     m_amp = 0.;
     m_counter = 0;
@@ -280,6 +303,8 @@ struct AmpEnv
         {
           m_amp = m_sustainAmp;
           m_stage = Sustain;
+          if(m_oneShot)
+            startRelease();
         }
         // A near-silent decay tail will never be heard again: free the voice
         if(m_amp <= silence_amp)
@@ -291,6 +316,8 @@ struct AmpEnv
         return m_amp;
 
       case Sustain:
+        if(m_oneShot)
+          startRelease();
         return m_amp;
 
       case Release:
@@ -343,6 +370,7 @@ private:
   int64_t m_counter{};
   Stage m_stage{Done};
   bool m_dbMode{false};
+  bool m_oneShot{false};
 };
 
 // lerp(1, vel/127, k) for k in [0,1]; lerp(1, 1 - vel/127, -k) for k < 0

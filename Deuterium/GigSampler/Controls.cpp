@@ -140,6 +140,12 @@ void applySamplerControl(SamplerParams& p, int control, const ossia::value& val)
     case ChromaticRoot:
       num(p.chromaticRoot, 0, 127);
       break;
+    case NoteOff:
+      p.ignoreNoteOff = ossia::convert<bool>(val);
+      break;
+    case MidiChannel:
+      num(p.midiChannel, 0, 16);
+      break;
     default:
       break;
   }

@@ -52,6 +52,9 @@ struct gig_voice
   bool released{};
   bool choked{};
   bool oneShotEff{};
+  //! Started with note-offs ignored: stays so when the mode changes, and
+  //! notes started otherwise still hear their note-off.
+  bool ignoresNoteOff{};
   bool filterOn{};
   int filterTypeEff{};
   double cutoffBaseHz{20000.};
@@ -144,7 +147,14 @@ public:
       // historical unit — seconds, except LfoRate where it is Hz.
       m_timeRaw[control].is_vec = false;
     }
+    const int previousChannel = m_params.midiChannel;
     applySamplerControl(m_params, control, v);
+    // Another channel filter could drop the note-offs of what plays now
+    if(m_params.midiChannel != previousChannel && m_params.midiChannel != 0)
+    {
+      all_notes_off();
+      m_heldKeys.reset();
+    }
     m_feedback[control][0] = ossia::convert<float>(v);
     m_feedback[control][1] = 0.f;
   }
@@ -301,6 +311,8 @@ public:
     const bool paused = timings.length == 0;
     for(const auto& [ts, data] : m_midiScratch)
     {
+      if(!acceptsChannel(m_params, data[0]))
+        continue;
       libremidi::message m{{data[0], data[1], data[2]}};
       const int note = data[1];
       const int velocity = data[2];
@@ -547,6 +559,16 @@ public:
         }
       }
 
+      // The envelope of an ignored note-off went into its release: the other
+      // envelopes follow, as on a note-off.
+      if(voice.playing && !voice.released && voice.ignoresNoteOff
+         && voice.amp_adsr.releasing())
+      {
+        voice.filterEnv.release();
+        voice.fileModEnv.release();
+        voice.released = true;
+      }
+
       if(voice.playing && voice.amp_adsr.done())
         stop_voice(voice);
     }
@@ -601,6 +623,19 @@ private:
       if(!anyMatch)
         return;
     }
+
+    // Note-offs ignored: a new strike of a key releases the previous one, or
+    // a sustaining sound would pile up forever. One-shots overlap as in the
+    // Release mode.
+    if(p.ignoreNoteOff)
+      for(auto& v : m_voices)
+        if(v.playing && !v.released && !v.oneShotEff && v.note == note)
+        {
+          v.amp_adsr.startRelease();
+          v.filterEnv.release();
+          v.fileModEnv.release();
+          v.released = true;
+        }
 
     // 1. chokes: any group this hit triggers cuts what currently sounds in it
     for(int i = 0; i < regionCount; i++)
@@ -729,7 +764,10 @@ private:
     m_heldKeys.reset(note & 127);
     for(auto& voice : m_voices)
     {
-      if(!voice.playing || voice.released)
+      // The key is up, but a note started with note-offs ignored plays on.
+      // Per note, not per mode: a note held while the mode switched to Ignore
+      // must still stop when its key is released.
+      if(!voice.playing || voice.released || voice.ignoresNoteOff)
         continue;
       if(voice.note != note)
         continue;
@@ -748,8 +786,9 @@ private:
       voice.released = true;
     }
     // Stray or duplicate note-offs (dropped note-on, reload, controllers
-    // sending both vel-0 and note-off) must not fire release triggers
-    if(!wasHeld)
+    // sending both vel-0 and note-off) must not fire release triggers, nor
+    // note-offs that are ignored
+    if(!wasHeld || m_params.ignoreNoteOff)
       return;
 
     // Release triggers: dedicated regions fired on note-off (gig)
@@ -817,6 +856,7 @@ private:
     voice.choked = false;
     voice.chokeGain = 1.0;
     voice.oneShotEff = region.oneShot || fromRelease;
+    voice.ignoresNoteOff = p.ignoreNoteOff;
 
     // Effective key / velocity: the SF2 keynum / velocity generators pin
     // them for pitch and gain purposes while matching and note-off keep the
@@ -870,6 +910,11 @@ private:
       voice.loop.mode = 0;
     if(fromRelease)
       voice.loop.mode = 0;
+    // Note-offs ignored: a loop until the release would never be left. Other
+    // loops play on and the envelope ends the note (a sampled piano fades out
+    // over its loop); as a one-shot it would stop at the end of its attack.
+    if(p.ignoreNoteOff && voice.loop.mode == 3)
+      voice.loop.mode = 0;
 
     // Gain: velocity curve, zone crossfade, region attenuation
     voice.gain = region.sampleAttenuation * velocityGain(region, p, effVel)
@@ -910,6 +955,11 @@ private:
     // The EMU dB-slope time semantics only apply to the file's own envelope;
     // user-set knobs mean time-to-sustain / time-to-silence
     voice.amp_adsr.dbMode(region.eg1DbSlope && p.decay < 0.f && p.release < 0.f);
+    // Note-offs ignored: the envelope does its release by itself after the
+    // decay (attack, hold, decay, release), so the Release setting still
+    // shapes the end of the note and a sustaining sound still ends. A
+    // one-shot already plays its whole sample whatever the mode.
+    voice.amp_adsr.oneShot(p.ignoreNoteOff && !voice.oneShotEff);
     voice.amp_adsr.amp(1.0);
 
     // Filter
@@ -1090,7 +1140,7 @@ Component::Component(
       const float b = node->m_feedback[i][1];
       if(dynamic_cast<Process::TimeChooser*>(ctl))
         ctl->setExecutionValue(ossia::vec2f{a, b});
-      else if(i == EnvFromFile) // a bool-valued combo box
+      else if(i == EnvFromFile || i == NoteOff) // bool-valued combo boxes
         ctl->setExecutionValue(a != 0.f);
       else if(dynamic_cast<Process::Toggle*>(ctl))
         ctl->setExecutionValue(a != 0.f);
