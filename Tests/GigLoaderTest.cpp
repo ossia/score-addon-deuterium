@@ -963,6 +963,47 @@ TEST_CASE("loader: hostile_drumkit_is_sanitized", "[deuterium]")
         REQUIRE(std::isfinite(s));
 }
 
+// <midiOutNote> is only Hydrogen's MIDI output note: kits such as the
+// MC-307 TR-808 set it to 60 for every instrument. That must not stack the
+// whole kit on one key; instruments then map by order from 36.
+TEST_CASE("loader: hydrogen_duplicate_midi_out_notes", "[deuterium]")
+{
+  const auto dirPath = tmp("dupnotekit");
+  QDir{}.mkpath(dirPath);
+  writeWavFile(dirPath + "/a.wav");
+  writeWavFile(dirPath + "/b.wav");
+  writeWavFile(dirPath + "/c.wav");
+
+  const char* xml = R"_(<?xml version="1.0" encoding="UTF-8"?>
+<drumkit_info xmlns="http://www.hydrogen-music.org/drumkit">
+<name>DupKit</name>
+<instrumentList>
+  <instrument><id>0</id><name>Kick 5</name><midiOutNote>60</midiOutNote>
+    <layer><filename>a.wav</filename><min>0</min><max>1</max></layer></instrument>
+  <instrument><id>1</id><name>Kick 6</name><midiOutNote>60</midiOutNote>
+    <layer><filename>b.wav</filename><min>0</min><max>1</max></layer></instrument>
+  <instrument><id>2</id><name>Snare 3</name><midiOutNote>60</midiOutNote>
+    <layer><filename>c.wav</filename><min>0</min><max>1</max></layer></instrument>
+</instrumentList>
+</drumkit_info>
+)_";
+  QFile out(dirPath + "/drumkit.xml");
+  REQUIRE(out.open(QIODevice::WriteOnly));
+  out.write(xml);
+  out.close();
+
+  auto info = loadGigFileMetadata(dirPath + "/drumkit.xml");
+  REQUIRE(info);
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(3)));
+  for(int i = 0; i < 3; i++)
+  {
+    REQUIRE(approxEq(int(regions[i].keyLow), 36 + i));
+    REQUIRE(approxEq(int(regions[i].keyHigh), 36 + i));
+  }
+  REQUIRE(approxEq(regions[2].noteLabel, std::string("Snare 3")));
+}
+
 // The shdr pitch correction is signed cents and must reach the region's
 // fine tune: hardware-sampled banks (e.g. phone rips) rely on it, and
 // without it adjacent key ranges end up audibly out of tune relative to
