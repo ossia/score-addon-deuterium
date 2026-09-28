@@ -16,6 +16,7 @@
 #include <gig.h>
 
 #include <algorithm>
+#include <bitset>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -1934,16 +1935,40 @@ loadMetadata_hydrogen(const QString& filePath, int instrumentIndex)
   // Hydrogen stores ADSR stage lengths as frame counts at 44.1 kHz
   constexpr double hydrogenFramesToSeconds = 1.0 / 44100.0;
 
+  const auto instruments
+      = root.firstChildElement("instrumentList").childrenNamed("instrument");
+
+  // <midiOutNote> is the note Hydrogen *sends*, not a key mapping: Hydrogen
+  // itself maps incoming notes by instrument order. Many kits leave it at
+  // the same value for every instrument (e.g. all 60), which would stack the
+  // whole kit on a single key; only trust it when it separates instruments.
+  bool useMidiOutNote = true;
+  {
+    std::bitset<128> seen;
+    for(const XmlElement* instp : instruments)
+    {
+      const auto& e = instp->firstChildElement("midiOutNote");
+      if(e.isNull())
+        continue;
+      const int n = std::clamp(e.text().toInt(), 0, 127);
+      if(seen[n])
+      {
+        useMidiOutNote = false;
+        break;
+      }
+      seen[n] = true;
+    }
+  }
+
   int base_midi_note = 36; // for instruments that do not specify a note
-  for(const XmlElement* instp :
-      root.firstChildElement("instrumentList").childrenNamed("instrument"))
+  for(const XmlElement* instp : instruments)
   {
     const XmlElement& inst = *instp;
     const auto name = inst.firstChildElement("name").text();
 
     int midi_note = base_midi_note;
     if(const auto& midiOutNote = inst.firstChildElement("midiOutNote");
-       !midiOutNote.isNull())
+       useMidiOutNote && !midiOutNote.isNull())
     {
       midi_note = midiOutNote.text().toInt();
     }
