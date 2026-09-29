@@ -95,6 +95,29 @@ add_deuterium_test(Deuterium_ProcessModelTest
   "${DEUTERIUM_ROOT}/Deuterium/GigSampler/ProcessModelSerialization.cpp"
 )
 
+# The executor's node, driven without a document
+add_deuterium_test(Deuterium_SamplerNodeTest
+  "${CMAKE_CURRENT_SOURCE_DIR}/SamplerNodeTest.cpp"
+  "${DEUTERIUM_ROOT}/Deuterium/GigSampler/Controls.cpp"
+  "${DEUTERIUM_ROOT}/Deuterium/GigSampler/ProcessModel.cpp"
+  "${DEUTERIUM_ROOT}/Deuterium/GigSampler/ProcessModelSerialization.cpp"
+)
+
+# The sampler in a document, with the plug-in loaded by the application: the
+# executor component between the process's controls and the node.
+if(COMMAND score_add_test)
+  score_add_test(Deuterium_SamplerDocumentTest
+    SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/SamplerDocumentTest.cpp"
+    APP
+    PLUGINS score_plugin_engine score_plugin_scenario score_lib_process)
+  add_dependencies(Deuterium_SamplerDocumentTest score_addon_deuterium)
+  target_include_directories(Deuterium_SamplerDocumentTest PRIVATE
+    "${DEUTERIUM_ROOT}"
+    # score_test_fixtures carries this include dir, but it is declared after
+    # the addons, so its INTERFACE properties are not there to inherit yet.
+    "${SCORE_ROOT_SOURCE_DIR}/tests/fixtures")
+endif()
+
 # Manual tool, not a ctest test: scans user-installed sample packs (which are
 # machine-specific and huge) and loads each file in an isolated subprocess
 # through the same loader path score uses, to find crashing files.
