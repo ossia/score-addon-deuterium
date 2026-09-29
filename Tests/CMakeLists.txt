@@ -118,6 +118,19 @@ if(COMMAND score_add_test)
     "${SCORE_ROOT_SOURCE_DIR}/tests/fixtures")
 endif()
 
+# The sampler's bank through consolidating, archiving and cleaning up a project:
+# a drumkit travels with its samples and is found again through <PROJECT>:.
+if(COMMAND score_add_test)
+  score_add_test(Deuterium_SamplerConsolidationTest
+    SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/SamplerConsolidationTest.cpp"
+    APP
+    PLUGINS score_plugin_scenario score_lib_process)
+  add_dependencies(Deuterium_SamplerConsolidationTest score_addon_deuterium)
+  target_include_directories(Deuterium_SamplerConsolidationTest PRIVATE
+    "${DEUTERIUM_ROOT}"
+    "${SCORE_ROOT_SOURCE_DIR}/tests/fixtures")
+endif()
+
 # Manual tool, not a ctest test: scans user-installed sample packs (which are
 # machine-specific and huge) and loads each file in an isolated subprocess
 # through the same loader path score uses, to find crashing files.

@@ -7,6 +7,7 @@
 #include <QDirIterator>
 #include <QXmlStreamReader>
 #include <QHash>
+#include <QSet>
 #include <QFile>
 #include <QFileInfo>
 
@@ -2491,6 +2492,52 @@ QString formatName(const QString& filePath)
       break;
   }
   return QStringLiteral("GIG");
+}
+
+std::vector<QString> externalSampleFiles(const QString& filePath)
+{
+  std::shared_ptr<GigFileInfo> info;
+  try
+  {
+    switch(formatForPath(filePath))
+    {
+      case SampleFileFormat::Hydrogen:
+        info = loadMetadata_hydrogen(filePath, 0);
+        break;
+      case SampleFileFormat::Korg:
+        info = loadMetadata_korg(filePath, 0);
+        break;
+      default:
+        return {};
+    }
+  }
+  catch(...)
+  {
+    return {};
+  }
+  if(!info)
+    return {};
+
+  // Regions share samples: velocity zones of one note, round-robin groups.
+  const QDir dir = QFileInfo{filePath}.dir();
+  QSet<QString> seen;
+  std::vector<QString> files;
+  for(const auto& instrument : info->instruments)
+  {
+    for(const auto& region : instrument.regions)
+    {
+      if(region.sample.sourceFile.empty())
+        continue;
+      QString rel
+          = dir.relativeFilePath(QString::fromStdString(region.sample.sourceFile));
+      if(!seen.contains(rel))
+      {
+        seen.insert(rel);
+        files.push_back(std::move(rel));
+      }
+    }
+  }
+  return files;
 }
 
 std::shared_ptr<GigFileInfo>

@@ -170,6 +170,11 @@ std::vector<std::string> listInstruments(const QString& filePath);
 // sniffing with the extension as fallback: "GIG", "DLS", "SF2" or "Drumkit".
 QString formatName(const QString& filePath);
 
+// The audio files a bank names outside of itself -- the layers of a Hydrogen
+// drumkit, the .KSF samples of a KORG .KMP -- relative to the bank's folder.
+// Empty for self-contained banks (GIG, DLS, SF2) and plain audio files.
+std::vector<QString> externalSampleFiles(const QString& filePath);
+
 // Phase 1: Fast metadata parse (GUI-safe).
 // Returns a GigFileInfo with all region/instrument metadata populated
 // but with empty sample data arrays.
