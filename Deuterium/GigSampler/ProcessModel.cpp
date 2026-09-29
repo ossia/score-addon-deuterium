@@ -2,9 +2,15 @@
 
 #include <Audio/Settings/Model.hpp>
 #include <Process/Dataflow/Port.hpp>
+#include <Process/Dataflow/WidgetInlets.hpp>
+#include <Process/ExternalFiles.hpp>
 
 #include <score/application/ApplicationContext.hpp>
+#include <score/document/DocumentInterface.hpp>
+#include <score/tools/FilePath.hpp>
 #include <score/tools/ThreadPool.hpp>
+
+#include <core/document/Document.hpp>
 
 #include <QCoreApplication>
 #include <QMetaObject>
@@ -109,6 +115,26 @@ QString ProcessModel::effect() const noexcept
   return m_filePath;
 }
 
+void ProcessModel::mapExternalFiles(Process::ExternalFileMap& map)
+{
+  // Instead of the base walk, whose only find here would be the bank: a
+  // drumkit.xml or a .kmp collected without the samples it names relative to
+  // itself plays nothing.
+  const auto samples = [this](const QString& stored) {
+    return externalSampleFiles(resolvedPath(stored));
+  };
+  for(auto* inlet : m_inlets)
+    if(auto* file = qobject_cast<Process::FileChooserBase*>(inlet))
+      map.control(*file, score::FileKind::Unknown, Process::FileUsage::Input, samples);
+}
+
+QString ProcessModel::resolvedPath(const QString& stored) const
+{
+  if(auto* doc = score::IDocument::try_documentFromObject(*this))
+    return score::locateFilePath(stored, doc->context());
+  return score::locateFilePath(stored);
+}
+
 void ProcessModel::loadFile(const QString& data)
 {
   const auto parsed = parseInstrumentPath(data);
@@ -163,7 +189,9 @@ void ProcessModel::startAsyncLoad()
   auto cancelToken = std::make_shared<std::atomic<bool>>(false);
   m_cancelToken = cancelToken;
 
-  const QString path = m_filePath;
+  // <PROJECT>: and <LIBRARY>: are what consolidating and the library leave in
+  // a document.
+  const QString path = resolvedPath(m_filePath);
   const int instrument = m_instrument;
 
   // Use a QPointer so the callback is safe if ProcessModel is deleted

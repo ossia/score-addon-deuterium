@@ -35,6 +35,7 @@ public:
   ~ProcessModel() override;
 
   QString effect() const noexcept override;
+  void mapExternalFiles(Process::ExternalFileMap& map) override;
   // Accepts a plain path or the "<path>|<instrument>" creation string
   void loadFile(const QString& data);
   void loadFile(const QString& path, int instrument);
@@ -59,6 +60,9 @@ public:
 private:
   void wireInstrumentControl();
   void startAsyncLoad();
+  //! A stored path (absolute, document-relative, <PROJECT>: or <LIBRARY>:)
+  //! as a file the loader can open.
+  QString resolvedPath(const QString& stored) const;
 
   QString m_filePath;
   int m_instrument{};
