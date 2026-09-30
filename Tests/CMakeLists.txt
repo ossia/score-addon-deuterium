@@ -35,8 +35,8 @@ endif()
 
 set(DEUTERIUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 
-# The addon's symbols are not exported, so the tested sources are compiled
-# directly into each executable instead of linking the plugin.
+# The tested sources are compiled directly into each executable instead of
+# linking the plugin.
 function(add_deuterium_tool TESTNAME TESTSRCS)
   add_executable(${TESTNAME} ${TESTSRCS} ${ARGN}
     "${DEUTERIUM_ROOT}/Deuterium/GigSampler/GigLoader.cpp"
@@ -49,10 +49,14 @@ function(add_deuterium_tool TESTNAME TESTSRCS)
   # Test sources call the serialization visitors directly; merging them with
   # the addon's serialization TU breaks explicit specialization ordering.
   set_target_properties(${TESTNAME} PROPERTIES UNITY_BUILD FALSE)
+  # The addon's export header; the tested sources are part of the executable,
+  # so they are built as the exporting side.
   target_include_directories(${TESTNAME} PRIVATE
     "${DEUTERIUM_ROOT}"
     "${LIBGIG_DIR}/src"
+    "${CMAKE_CURRENT_BINARY_DIR}/.."
   )
+  target_compile_definitions(${TESTNAME} PRIVATE SCORE_ADDON_DEUTERIUM_EXPORTS)
   if(LIBGIG_COMPAT_DIR)
     target_include_directories(${TESTNAME} PRIVATE "${LIBGIG_COMPAT_DIR}/src")
   endif()
@@ -113,6 +117,7 @@ if(COMMAND score_add_test)
   add_dependencies(Deuterium_SamplerDocumentTest score_addon_deuterium)
   target_include_directories(Deuterium_SamplerDocumentTest PRIVATE
     "${DEUTERIUM_ROOT}"
+    "${CMAKE_CURRENT_BINARY_DIR}/.."
     # score_test_fixtures carries this include dir, but it is declared after
     # the addons, so its INTERFACE properties are not there to inherit yet.
     "${SCORE_ROOT_SOURCE_DIR}/tests/fixtures")
@@ -128,6 +133,7 @@ if(COMMAND score_add_test)
   add_dependencies(Deuterium_SamplerConsolidationTest score_addon_deuterium)
   target_include_directories(Deuterium_SamplerConsolidationTest PRIVATE
     "${DEUTERIUM_ROOT}"
+    "${CMAKE_CURRENT_BINARY_DIR}/.."
     "${SCORE_ROOT_SOURCE_DIR}/tests/fixtures")
 endif()
 
