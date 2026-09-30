@@ -7,6 +7,8 @@
 #include <Deuterium/GigSampler/GigLoader.hpp>
 #include <Deuterium/GigSampler/ProcessMetadata.hpp>
 
+#include <score_addon_deuterium_export.h>
+
 #include <atomic>
 #include <memory>
 #include <verdigris>
@@ -14,7 +16,7 @@
 namespace Deuterium::Gig
 {
 class ProcessModel;
-class ProcessModel final : public Process::ProcessModel
+class SCORE_ADDON_DEUTERIUM_EXPORT ProcessModel final : public Process::ProcessModel
 {
   SCORE_SERIALIZE_FRIENDS
   PROCESS_METADATA_IMPL(Deuterium::Gig::ProcessModel)
