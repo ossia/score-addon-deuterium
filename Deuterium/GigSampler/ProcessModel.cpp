@@ -135,6 +135,13 @@ QString ProcessModel::resolvedPath(const QString& stored) const
   return score::locateFilePath(stored);
 }
 
+QString ProcessModel::storedPath() const
+{
+  if(auto* doc = score::IDocument::try_documentFromObject(*this))
+    return score::relativizeFilePath(m_filePath, doc->context());
+  return score::relativizeFilePath(m_filePath);
+}
+
 void ProcessModel::loadFile(const QString& data)
 {
   const auto parsed = parseInstrumentPath(data);

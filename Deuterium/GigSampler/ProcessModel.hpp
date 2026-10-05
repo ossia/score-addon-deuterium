@@ -65,6 +65,9 @@ private:
   //! A stored path (absolute, document-relative, <PROJECT>: or <LIBRARY>:)
   //! as a file the loader can open.
   QString resolvedPath(const QString& stored) const;
+  //! m_filePath as a document saves it: <PROJECT>: or <LIBRARY>: when the
+  //! file lives under the document's folder or the user library.
+  QString storedPath() const;
 
   QString m_filePath;
   int m_instrument{};

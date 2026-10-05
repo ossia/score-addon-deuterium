@@ -53,7 +53,7 @@ void ensureControls(Deuterium::Gig::ProcessModel& proc, Process::Inlets& inlets)
 template <>
 void DataStreamReader::read(const Deuterium::Gig::ProcessModel& proc)
 {
-  m_stream << proc.m_filePath << deuteriumStreamMarker << proc.m_instrument;
+  m_stream << proc.storedPath() << deuteriumStreamMarker << proc.m_instrument;
   readPorts(*this, proc.m_inlets, proc.m_outlets);
 
   insertDelimiter();
@@ -93,7 +93,7 @@ void DataStreamWriter::write(Deuterium::Gig::ProcessModel& proc)
 template <>
 void JSONReader::read(const Deuterium::Gig::ProcessModel& proc)
 {
-  obj["File"] = proc.m_filePath;
+  obj["File"] = proc.storedPath();
   obj["Instrument"] = proc.m_instrument;
   readPorts(*this, proc.m_inlets, proc.m_outlets);
 }
