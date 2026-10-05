@@ -17,6 +17,8 @@
 #include <ossia/detail/algorithms.hpp>
 
 #include <QDir>
+#include <QFile>
+#include <QSettings>
 #include <QTemporaryDir>
 
 #include <catch2/catch_test_macros.hpp>
@@ -151,5 +153,47 @@ TEST_CASE("Deuterium: a drumkit is consolidated with its samples", "[deuterium]"
     REQUIRE(files.size() == 2);
     for(const auto& f : files)
       CHECK(score::isUnderFolder(f, project + "/Data/MyKit"));
+  });
+}
+
+TEST_CASE("Deuterium: a kit under the project or the library is saved relative to it", "[deuterium]")
+{
+  score::test::run_in_app([](const score::GUIApplicationContext& ctx) {
+    QTemporaryDir projectDir, libraryDir;
+    REQUIRE(projectDir.isValid());
+    REQUIRE(libraryDir.isValid());
+    const QString project = score::test::canonical(projectDir.path());
+    const QString library = score::test::canonical(libraryDir.path());
+
+    QSettings settings;
+    const auto oldRoot = settings.value("Library/RootPath");
+    settings.setValue("Library/RootPath", library);
+
+    write_kit(project + "/Kits/Local");
+    write_kit(library + "/packages/drums/Shared");
+
+    auto* doc = score::test::project_document(ctx, project, "paths.score");
+    REQUIRE(score::test::add_process(
+        *doc, sampler_uuid, project + "/Kits/Local/drumkit.xml"));
+    REQUIRE(score::test::add_process(
+        *doc, sampler_uuid, library + "/packages/drums/Shared/drumkit.xml"));
+    REQUIRE(ctx.docManager.saveDocument(*doc));
+
+    QFile f{project + "/paths.score"};
+    REQUIRE(f.open(QIODevice::ReadOnly));
+    const auto saved = QString::fromUtf8(f.readAll());
+
+    // Both the process's own reference and its File control.
+    CHECK(saved.count("<PROJECT>:Kits/Local/drumkit.xml") == 2);
+    CHECK(saved.count("<LIBRARY>:packages/drums/Shared/drumkit.xml") == 2);
+    CHECK(!saved.contains(project + "/Kits"));
+    CHECK(!saved.contains(library + "/packages"));
+
+    ctx.docManager.forceCloseDocument(ctx, *doc);
+    score::test::settle();
+    if(oldRoot.isValid())
+      settings.setValue("Library/RootPath", oldRoot);
+    else
+      settings.remove("Library/RootPath");
   });
 }
