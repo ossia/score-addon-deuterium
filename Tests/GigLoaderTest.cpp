@@ -1401,3 +1401,81 @@ TEST_CASE("loader: cancelled_drumkit_decodes_nothing", "[deuterium]")
   REQUIRE(approxEq(after.audioDecodes, before.audioDecodes));
 }
 
+
+TEST_CASE("loader: bank_credits", "[deuterium]")
+{
+  SECTION("a drumkit names its author, license and info")
+  {
+    const auto kitDir = tmp("creditedkit");
+    QDir{}.mkpath(kitDir);
+    QFile out(kitDir + "/drumkit.xml");
+    REQUIRE(out.open(QIODevice::WriteOnly));
+    // Older kits spell it <licence>; the editor saves the info as rich text
+    out.write(R"(<?xml version="1.0" encoding="UTF-8"?>
+<drumkit_info xmlns="http://www.hydrogen-music.org/drumkit">
+ <name>Classic-808</name>
+ <author>Hollow Sun</author>
+ <info>&lt;html>&lt;body>&lt;p>Sounds recorded by Steve Howell (Hollow Sun), Hydrogen kit created by Artemiy Pavlov (Sineshine).&lt;/p>&lt;/body>&lt;/html></info>
+ <licence>Public Domain</licence>
+ <instrumentList/>
+</drumkit_info>)");
+    out.close();
+
+    const auto c = bankCredits(kitDir + "/drumkit.xml");
+    CHECK(c.author == "Hollow Sun");
+    CHECK(c.license == "Public Domain");
+    CHECK(
+        c.info
+        == "Sounds recorded by Steve Howell (Hollow Sun), Hydrogen kit created by "
+           "Artemiy Pavlov (Sineshine).");
+  }
+
+  SECTION("a kit converted by Klaatu says so")
+  {
+    const auto kitDir = tmp("klaatukit");
+    QDir{}.mkpath(kitDir);
+    QFile out(kitDir + "/drumkit.xml");
+    REQUIRE(out.open(QIODevice::WriteOnly));
+    out.write(R"(<?xml version="1.0" encoding="UTF-8"?>
+<drumkit_info>
+ <name>Moogish</name>
+ <author>Klaatu</author>
+ <instrumentList/>
+</drumkit_info>)");
+    out.close();
+    CHECK(bankCredits(kitDir + "/drumkit.xml").author == "Klaatu (Hydrogen kit conversion)");
+  }
+
+  SECTION("the <license> spelling")
+  {
+    const auto c = bankCredits(makeHydrogenKit(tmp("licensedkit")));
+    CHECK(c.author == "tests");
+    CHECK(c.license == "CC0");
+  }
+
+  SECTION("a gig names its engineer and copyright")
+  {
+    // libgig cannot save a gig without samples: credit an existing bank.
+    const auto path = makeGigFile(tmp("credited.gig"));
+    {
+      RIFF::File riff(path.toStdString());
+      gig::File f(&riff);
+      // Save() rewrites the sample and instrument tables, which load lazily
+      f.GetFirstSample();
+      f.GetFirstInstrument();
+      f.pInfo->Engineer = "Some Engineer";
+      f.pInfo->Copyright = "(c) Somebody 2001";
+      f.Save();
+    }
+
+    const auto c = bankCredits(path);
+    CHECK(c.author == "Some Engineer");
+    CHECK(c.copyright == "(c) Somebody 2001");
+  }
+
+  SECTION("files without credits")
+  {
+    CHECK(bankCredits(makeSf2File(tmp("credits.sf2"))).author.isEmpty());
+    CHECK(bankCredits(tmp("does-not-exist.gig")).author.isEmpty());
+  }
+}

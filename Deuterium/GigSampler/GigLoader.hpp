@@ -170,6 +170,18 @@ std::vector<std::string> listInstruments(const QString& filePath);
 // sniffing with the extension as fallback: "GIG", "DLS", "SF2" or "Drumkit".
 QString formatName(const QString& filePath);
 
+// What a bank file says about who made it, read from its own metadata:
+// Hydrogen's <author>, <info> and <license> (or <licence>), the INFO chunk of
+// GIG, DLS and SF2 files. Fields the file does not have stay empty.
+struct BankCredits
+{
+  QString author;
+  QString license;
+  QString copyright;
+  QString info; // plain text
+};
+BankCredits bankCredits(const QString& filePath);
+
 // The audio files a bank names outside of itself -- the layers of a Hydrogen
 // drumkit, the .KSF samples of a KORG .KMP -- relative to the bank's folder.
 // Empty for self-contained banks (GIG, DLS, SF2) and plain audio files.

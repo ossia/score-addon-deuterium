@@ -60,6 +60,7 @@ set(HDRS
 set(SRCS
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Controls.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/GigLoader.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessFactory.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessModel.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessModelSerialization.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Executor/Component.cpp"
