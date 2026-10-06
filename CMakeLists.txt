@@ -141,6 +141,10 @@ target_link_libraries(
   PRIVATE
 )
 
+if(COMMAND score_register_license)
+  score_register_license(libgig URL "https://www.linuxsampler.org/libgig" NOTICES "${LIBGIG_DIR}/src/gig.h" FILES "${LIBGIG_DIR}/COPYING")
+endif()
+
 setup_score_plugin(${PROJECT_NAME})
 
 # In-tree builds only: external addon builds have neither the test
