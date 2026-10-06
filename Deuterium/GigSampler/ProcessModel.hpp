@@ -42,12 +42,12 @@ public:
   void loadFile(const QString& data);
   void loadFile(const QString& path, int instrument);
   int instrument() const noexcept { return m_instrument; }
-  void fileChanged() W_SIGNAL(fileChanged)
+  void fileChanged() E_SIGNAL(SCORE_ADDON_DEUTERIUM_EXPORT, fileChanged)
 
   //! Live note trigger from the panel's keyboard / pads widget; routed to
   //! the execution component which plays it on the next buffer.
   void uiNoteTriggered(int note, int velocity, bool on)
-      W_SIGNAL(uiNoteTriggered, note, velocity, on)
+      E_SIGNAL(SCORE_ADDON_DEUTERIUM_EXPORT, uiNoteTriggered, note, velocity, on)
 
   std::shared_ptr<GigFileInfo> gigInfo() const noexcept { return m_gigInfo; }
 
