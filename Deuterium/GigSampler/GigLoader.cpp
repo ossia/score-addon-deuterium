@@ -10,6 +10,8 @@
 #include <QSet>
 #include <QFile>
 #include <QFileInfo>
+#include <QTextDocument>
+#include <QTextDocumentFragment>
 
 #include <DLS.h>
 #include <Korg.h>
@@ -2492,6 +2494,73 @@ QString formatName(const QString& filePath)
       break;
   }
   return QStringLiteral("GIG");
+}
+
+BankCredits bankCredits(const QString& filePath)
+{
+  BankCredits c;
+  const auto riffText = [](const std::string& s) {
+    return QString::fromStdString(s).trimmed();
+  };
+  try
+  {
+    switch(formatForPath(filePath))
+    {
+      case SampleFileFormat::Hydrogen: {
+        QFile file(filePath);
+        if(!file.open(QIODevice::ReadOnly))
+          break;
+        XmlElement root;
+        if(!parseXml(file, root) || root.tag != "drumkit_info")
+          break;
+        c.author = root.firstChildElement("author").text().trimmed();
+        // Klaatu converted these kits from samples recorded by others
+        if(c.author == QLatin1String("Klaatu"))
+          c.author = QStringLiteral("Klaatu (Hydrogen kit conversion)");
+        const auto* license = &root.firstChildElement("license");
+        if(license->isNull())
+          license = &root.firstChildElement("licence");
+        c.license = license->text().trimmed();
+        // Kits saved by Hydrogen's editor store the info as rich text
+        c.info = root.firstChildElement("info").text();
+        if(Qt::mightBeRichText(c.info))
+          c.info = QTextDocumentFragment::fromHtml(c.info).toPlainText();
+        c.info = c.info.trimmed();
+        break;
+      }
+      // Only the RIFF chunk list is read: constructing the bank objects would
+      // scan every sample, and the libgig lock is not needed for it.
+      case SampleFileFormat::Gig:
+      case SampleFileFormat::Dls: {
+        RIFF::File riff(filePath.toStdString());
+        DLS::Info info(&riff);
+        c.author = riffText(info.Engineer);
+        c.copyright = riffText(info.Copyright);
+        c.info = riffText(info.Comments);
+        break;
+      }
+      case SampleFileFormat::Sf2: {
+        RIFF::File riff(filePath.toStdString());
+        // sf2::Info leaves its version pointers unset, and deletes them,
+        // when there is no INFO list
+        if(!riff.GetSubList(LIST_TYPE_INFO))
+          break;
+        sf2::Info info(&riff);
+        c.author = riffText(info.Engineers);
+        c.copyright = riffText(info.Copyright);
+        c.info = riffText(info.Comments);
+        break;
+      }
+      case SampleFileFormat::Korg:
+      case SampleFileFormat::AudioFile:
+        break;
+    }
+  }
+  catch(...)
+  {
+    return {};
+  }
+  return c;
 }
 
 std::vector<QString> externalSampleFiles(const QString& filePath)

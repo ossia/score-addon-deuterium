@@ -9,5 +9,9 @@
 
 namespace Deuterium::Gig
 {
-using ProcessFactory = Process::ProcessFactory_T<Deuterium::Gig::ProcessModel>;
+class ProcessFactory final : public Process::ProcessFactory_T<Deuterium::Gig::ProcessModel>
+{
+public:
+  Process::Descriptor descriptor(QString data) const noexcept override;
+};
 }
