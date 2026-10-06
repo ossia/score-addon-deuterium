@@ -13,7 +13,7 @@ class ProcessModel;
 // it load into this sampler, see ProcessModelSerialization.cpp.
 PROCESS_METADATA(
     , Deuterium::Gig::ProcessModel, "95f8ee65-e418-4f75-b5e4-3e039bb90ac8", "Deuterium",
-    "Deuterium", Process::ProcessCategory::Synth, "Audio/Synth",
+    "Deuterium", Process::ProcessCategory::Synth, "Synths",
     "Sampler for GIG/DLS/SF2/KORG banks, Hydrogen drumkits and audio files",
     "ossia score",
     (QStringList{"Script", "Deuterium", "Sampler", "GigSampler"}), {}, {},
