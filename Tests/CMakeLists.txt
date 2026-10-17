@@ -9,9 +9,17 @@ if(SCORE_STATIC_PLUGINS)
   return()
 endif()
 
+# The tests compile the loader directly and need score's compiled libraries
+# (e.g. Media::AudioDecoder); external-addon builds only have header-only
+# INTERFACE stand-ins, whose undefined symbols an executable cannot carry.
+get_target_property(_deut_media_type score_plugin_media TYPE)
+if(_deut_media_type STREQUAL "INTERFACE_LIBRARY")
+  message(STATUS "score-addon-deuterium: no score binaries (external build), skipping tests")
+  return()
+endif()
+
 # The tests are Catch2-based; Catch2 is vendored in score's libossia tree
-# and set up by score's test infrastructure. Skip when unavailable (e.g.
-# external SDK builds).
+# and set up by score's test infrastructure. Skip when unavailable.
 if(NOT COMMAND score_setup_catch2)
   include(ScoreTests OPTIONAL)
 endif()
@@ -21,15 +29,6 @@ endif()
 find_package(${QT_VERSION} COMPONENTS Core)
 if(NOT TARGET Catch2::Catch2WithMain)
   message(STATUS "score-addon-deuterium: Catch2 not available, skipping tests")
-  return()
-endif()
-
-# The tests compile the loader directly and need score's compiled libraries
-# (e.g. Media::AudioDecoder); external-addon builds only have header-only
-# INTERFACE stand-ins, whose undefined symbols an executable cannot carry.
-get_target_property(_deut_media_type score_plugin_media TYPE)
-if(_deut_media_type STREQUAL "INTERFACE_LIBRARY")
-  message(STATUS "score-addon-deuterium: no score binaries (external build), skipping tests")
   return()
 endif()
 
