@@ -1,4 +1,5 @@
 #pragma once
+#include <optional>
 #include <Process/Process.hpp>
 
 #include <Control/DefaultEffectItem.hpp>
@@ -62,6 +63,9 @@ public:
 private:
   void wireInstrumentControl();
   void startAsyncLoad();
+  //! Sets the controls a bank specifies itself (the gig pitch-bend range)
+  //! from the instrument that just loaded, unless the user changed them
+  void applyFileDefaults();
   //! A stored path (absolute, document-relative, <PROJECT>: or <LIBRARY>:)
   //! as a file the loader can open.
   QString resolvedPath(const QString& stored) const;
@@ -73,6 +77,14 @@ private:
   int m_instrument{};
   std::shared_ptr<GigFileInfo> m_gigInfo;
   std::shared_ptr<std::atomic<bool>> m_cancelToken;
+  //! The load in flight was asked for by the user (new process, other file
+  //! or instrument), not by a document being restored: once it lands, the
+  //! bank's own defaults replace the current control values
+  bool m_applyFileDefaults{};
+  //! The bend range the last bank set: the control still holding it (or its
+  //! initial value) means the user did not choose one, and the next bank's
+  //! may replace it. Not saved: a restored document keeps its value.
+  std::optional<float> m_bankBendRange;
 };
 
 }

@@ -58,7 +58,7 @@ TEST_CASE("engine: velocity_curve", "[deuterium]")
   SamplerParams p;
   p.velAmount = 1.f;
 
-  p.velCurve = 0; // the default is 2 (hard, the SF2 curve)
+  p.velCurve = 0; // the default is 3 (the file's curve, else hard)
   const double lin = velocityGain(r, p, 64);
   p.velCurve = 1; // soft
   const double soft = velocityGain(r, p, 64);
@@ -74,6 +74,66 @@ TEST_CASE("engine: velocity_curve", "[deuterium]")
     REQUIRE(std::abs(velocityGain(r, p, 127) - 1.) < 1e-9);
     REQUIRE(std::abs(velocityGain(r, p, 0) - 0.) < 1e-9);
   }
+}
+
+// gig files carry their own velocity response; "From file" (the default)
+// uses it, the explicit curves still override it, and without a table it is
+// the hard curve
+TEST_CASE("engine: velocity_curve_from_file", "[deuterium]")
+{
+  auto r = makeRegion();
+  SamplerParams p;
+  p.velAmount = 1.f;
+  REQUIRE(p.velCurve == 3);
+
+  const double hardNoTable = velocityGain(r, p, 64);
+  p.velCurve = 2;
+  REQUIRE(std::abs(velocityGain(r, p, 64) - hardNoTable) < 1e-12);
+
+  auto table = std::make_shared<std::array<float, 128>>();
+  for(int v = 0; v < 128; v++)
+    (*table)[v] = 0.25f + 0.75f * v / 127.f;
+  r.velGainTable = table;
+  p.velCurve = 3;
+  REQUIRE(std::abs(velocityGain(r, p, 0) - 0.25) < 1e-6);
+  REQUIRE(std::abs(velocityGain(r, p, 127) - 1.) < 1e-6);
+  p.velCurve = 0;
+  REQUIRE(std::abs(velocityGain(r, p, 0) - 0.) < 1e-12);
+}
+
+TEST_CASE("engine: gig_layer_crossfade", "[deuterium]")
+{
+  auto r = makeRegion();
+  REQUIRE(gigCrossfadeGain(r, 0) == 1.); // no crossfade
+
+  r.xfadeSource = 1; // mod wheel
+  r.xfadeInStart = 0;
+  r.xfadeInEnd = 0;
+  r.xfadeOutStart = 32;
+  r.xfadeOutEnd = 80;
+  REQUIRE(std::abs(gigCrossfadeGain(r, 0) - 1.) < 1e-12);
+  REQUIRE(std::abs(gigCrossfadeGain(r, 32) - 1.) < 1e-12);
+  const double mid = gigCrossfadeGain(r, 56);
+  REQUIRE(mid > 0.);
+  REQUIRE(mid < 1.);
+  REQUIRE(gigCrossfadeGain(r, 80) == 0.);
+  REQUIRE(gigCrossfadeGain(r, 127) == 0.);
+
+  // The upper layer fades in where this one fades out
+  auto up = r;
+  up.xfadeInStart = 32;
+  up.xfadeInEnd = 80;
+  up.xfadeOutStart = 127;
+  up.xfadeOutEnd = 127;
+  REQUIRE(gigCrossfadeGain(up, 0) == 0.);
+  REQUIRE(std::abs(gigCrossfadeGain(up, 127) - 1.) < 1e-12);
+  // Equal power across the overlap
+  const double a = gigCrossfadeGain(r, 56), b = gigCrossfadeGain(up, 56);
+  REQUIRE(std::abs(a * a + b * b - 1.) < 1e-9);
+
+  r.xfadeInvert = true;
+  REQUIRE(gigCrossfadeGain(r, 127) == 1.);
+  REQUIRE(gigCrossfadeGain(r, 0) == 0.);
 }
 
 TEST_CASE("engine: velocity_zone_crossfade", "[deuterium]")
@@ -183,6 +243,48 @@ TEST_CASE("engine: amp_env_linear_mode", "[deuterium]")
   REQUIRE(!env.done());
   runFor(0.15);
   REQUIRE(env.done());
+}
+
+// gig EG1: the attack starts from the pre-attack level, and without infinite
+// sustain the level falls from the sustain level to silence over Decay2
+TEST_CASE("engine: amp_env_pre_attack_and_decay2", "[deuterium]")
+{
+  constexpr double rate = 48000.;
+  AmpEnv env;
+  env.reset();
+  env.set_sample_rate(rate);
+  env.attack(0.1);
+  env.hold(0.);
+  env.decay(0.1);
+  env.sustain(0.5);
+  env.release(0.2);
+  env.preAttack(0.5);
+  env.decay2(1.0);
+
+  // First sample of the attack already at the pre-attack level
+  REQUIRE(env() >= 0.5);
+
+  auto runFor = [&](double secs) {
+    double v = 0.;
+    for(int i = 0; i < int(secs * rate); i++)
+      v = env();
+    return v;
+  };
+  runFor(0.2); // attack + decay: at the sustain level
+  const double held = runFor(0.5);
+  REQUIRE(held < 0.5);
+  REQUIRE(held > 0.);
+  REQUIRE(!env.done());
+  runFor(0.6);
+  REQUIRE(env.done()); // silent while the key is still held
+
+  // Infinite sustain (decay2 < 0) holds the level
+  env.reset();
+  env.attack(0.001);
+  env.decay(0.01);
+  env.sustain(0.5);
+  runFor(2.);
+  REQUIRE(std::abs(env() - 0.5) < 1e-6);
 }
 
 TEST_CASE("engine: amp_env_release_during_attack", "[deuterium]")
@@ -480,6 +582,54 @@ TEST_CASE("engine: glide", "[deuterium]")
   REQUIRE(approxEq(g2.advanceBlock(64, 0.5, 48000.), 12.));
 }
 
+// What the Glide time means for each glide type: the time of an octave, of
+// a whole tone, of the whole glide, or 99% of an exponential approach
+TEST_CASE("engine: glide_types", "[deuterium]")
+{
+  constexpr double rate = 48000., glide = 0.5;
+  constexpr int block = 48; // 1 ms
+  // Milliseconds until the glide from `from` to `to` is over
+  auto duration = [&](int type, double from, double to) {
+    GlideState g;
+    g.start(from, to, true);
+    int ms = 0;
+    while(g.active && ms < 100000)
+    {
+      g.advanceBlock(block, glide, rate, type);
+      REQUIRE(std::isfinite(g.current));
+      ms++;
+    }
+    REQUIRE(approxEq(g.current, to));
+    return ms;
+  };
+  auto near = [](int ms, double expected) { return std::abs(ms - expected) <= 2; };
+
+  // Constant rate (octave): an octave takes the Glide time, two take twice
+  CHECK(near(duration(SamplerParams::GlideRateOctave, 0., 12.), 500));
+  CHECK(near(duration(SamplerParams::GlideRateOctave, 0., 24.), 1000));
+  CHECK(near(duration(SamplerParams::GlideRateOctave, 12., 10.), 500. / 6.));
+  // Constant rate (tone): a whole tone takes the Glide time
+  CHECK(near(duration(SamplerParams::GlideRateTone, 0., 2.), 500));
+  CHECK(near(duration(SamplerParams::GlideRateTone, 0., 12.), 3000));
+  // Constant time: any interval, up or down, takes the Glide time
+  CHECK(near(duration(SamplerParams::GlideTime, 0., 1.), 500));
+  CHECK(near(duration(SamplerParams::GlideTime, 0., 24.), 500));
+  CHECK(near(duration(SamplerParams::GlideTime, 7., -5.), 500));
+
+  // Exponential: 99% of the way after the Glide time, faster at first
+  {
+    GlideState g;
+    g.start(0., 12., true);
+    for(int ms = 0; ms < 50; ms++)
+      g.advanceBlock(block, glide, rate, SamplerParams::GlideExponential);
+    CHECK(g.current > 12. * 0.1 * 2); // over twice linear in the first 10%
+    for(int ms = 50; ms < 500; ms++)
+      g.advanceBlock(block, glide, rate, SamplerParams::GlideExponential);
+    CHECK(std::abs(g.current - 12. * 0.99) < 0.02);
+  }
+  CHECK(duration(SamplerParams::GlideExponential, 0., 12.) < 1000);
+}
+
 TEST_CASE("engine: round_robin", "[deuterium]")
 {
   uint8_t counter = 0;
@@ -515,11 +665,13 @@ TEST_CASE("engine: tempo_sync_time_resolution", "[deuterium]")
   // Tempo scales linearly
   REQUIRE(approxEq(syncTimeToSeconds(0.25f, 240.), 0.25f));
 
-  // The time controls are exactly the ten timing parameters
+  // The time controls are exactly the twelve timing parameters
   int n = 0;
   for(int i = 0; i < ControlCount; i++)
     n += isTimeControl(i) ? 1 : 0;
-  REQUIRE(n == 10);
+  REQUIRE(n == 12);
+  REQUIRE(isTimeControl(ChordWindow));
+  REQUIRE(isTimeControl(MonoFade));
   REQUIRE(isTimeControl(PitchEnvDecay));
   REQUIRE(isTimeControl(Attack));
   REQUIRE(isTimeControl(Decay));

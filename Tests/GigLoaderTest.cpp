@@ -2,6 +2,7 @@
 // Fixture files are generated on the fly: .gig and .dls through libgig's
 // file-creation API, .sf2 as a hand-written minimal SoundFont.
 #include <Deuterium/GigSampler/GigLoader.hpp>
+#include <Deuterium/GigSampler/SamplerEngine.hpp>
 
 #include <DLS.h>
 #include <gig.h>
@@ -12,6 +13,8 @@
 
 #include <atomic>
 #include <cstdint>
+#include <set>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -94,6 +97,20 @@ QString makeGigFile(
         }
       }
     }
+
+    // gig players take the loop from each dimension region's wsmp chunk
+    if(loopEnd > 0)
+    {
+      for(uint32_t z = 0; z < rgn->DimensionRegions; z++)
+      {
+        DLS::sample_loop_t loop{};
+        loop.Size = sizeof(DLS::sample_loop_t);
+        loop.LoopType = 0;
+        loop.LoopStart = loopStart;
+        loop.LoopLength = loopEnd - loopStart + 1;
+        rgn->pDimensionRegions[z]->AddSampleLoop(&loop);
+      }
+    }
   }
 
   f.Save(path.toStdString());
@@ -152,7 +169,9 @@ QString makeMultiSampleGigFile(
 }
 
 // Creates a mono 16-bit DLS file with one instrument and one region.
-QString makeDlsFile(const QString& path)
+QString makeDlsFile(
+    const QString& path, const std::string& instrumentName = "TestDlsInstrument",
+    uint32_t program = 0)
 {
   DLS::File f;
   f.pInfo->Name = "TestDlsBank";
@@ -171,7 +190,8 @@ QString makeDlsFile(const QString& path)
   smp->Resize(FRAMES);
 
   DLS::Instrument* ins = f.AddInstrument();
-  ins->pInfo->Name = "TestDlsInstrument";
+  ins->pInfo->Name = instrumentName;
+  ins->MIDIProgram = program;
 
   DLS::Region* rgn = ins->AddRegion();
   rgn->SetKeyRange(40, 52);
@@ -542,6 +562,352 @@ TEST_CASE("loader: gig_metadata", "[deuterium]")
   REQUIRE(!regions[0].sample.data); // metadata only
 }
 
+// gig tuning lives in the dimension region's wsmp chunk. The sample's smpl
+// chunk may disagree (e.g. WS_Guitar.gig), and its FineTune is an unsigned
+// fraction of a semitone: read as cents, it clamped to +-1200 and threw
+// keys octaves apart.
+TEST_CASE("loader: gig_tuning_from_dimension_region", "[deuterium]")
+{
+  const QString path = tmp("dimrgn_tuning.gig");
+  {
+    gig::File f;
+    f.pInfo->Name = "TestBank";
+    auto data = rampData();
+
+    gig::Sample* smp = f.AddSample();
+    smp->pInfo->Name = "TestSample";
+    smp->Channels = 1;
+    smp->BitDepth = 16;
+    smp->FrameSize = 2;
+    smp->SamplesPerSecond = RATE;
+    smp->MIDIUnityNote = 61;
+    smp->FineTune = 0xD999999Au; // 85 cents as a semitone fraction
+    smp->Resize(FRAMES);
+
+    gig::Instrument* ins = f.AddInstrument();
+    ins->pInfo->Name = "TestInstrument";
+    gig::Region* rgn = ins->AddRegion();
+    rgn->SetKeyRange(40, 40);
+    rgn->SetSample(smp);
+    auto* dr = rgn->pDimensionRegions[0];
+    dr->pSample = smp;
+    dr->UnityNote = 16;
+    dr->FineTune = 15;
+    dr->PitchTrack = false;
+
+    f.Save(path.toStdString());
+    smp->SetPos(0);
+    smp->Write(data.data(), FRAMES);
+  }
+
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  REQUIRE(approxEq(regions[0].sample.midiUnityNote, uint32_t(16)));
+  REQUIRE(approxEq(regions[0].sample.fineTune, 15));
+  REQUIRE(!regions[0].pitchTrack);
+}
+
+// A stereo gig sample sits in both zones of the sample-channel dimension;
+// playing both zones would start it twice (+6 dB, two voices per note)
+TEST_CASE("loader: gig_stereo_sample_channel_plays_once", "[deuterium]")
+{
+  const QString path = tmp("stereo_channels.gig");
+  {
+    gig::File f;
+    f.pInfo->Name = "TestBank";
+    std::vector<int16_t> data(FRAMES * 2);
+    for(int i = 0; i < FRAMES * 2; i++)
+      data[i] = int16_t(i * 8);
+
+    gig::Sample* smp = f.AddSample();
+    smp->pInfo->Name = "Stereo";
+    smp->Channels = 2;
+    smp->BitDepth = 16;
+    smp->FrameSize = 4;
+    smp->SamplesPerSecond = RATE;
+    smp->Resize(FRAMES);
+
+    gig::Instrument* ins = f.AddInstrument();
+    ins->pInfo->Name = "TestInstrument";
+    gig::Region* rgn = ins->AddRegion();
+    rgn->SetKeyRange(36, 48);
+    rgn->SetSample(smp);
+    gig::dimension_def_t def{};
+    def.dimension = gig::dimension_samplechannel;
+    def.bits = 1;
+    def.zones = 2;
+    rgn->AddDimension(&def);
+    for(uint32_t z = 0; z < rgn->DimensionRegions; z++)
+      rgn->pDimensionRegions[z]->pSample = smp;
+
+    f.Save(path.toStdString());
+    smp->SetPos(0);
+    smp->Write(data.data(), FRAMES);
+  }
+
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(1)));
+  // The file's velocity response comes along
+  REQUIRE(regions[0].velGainTable);
+  REQUIRE((*regions[0].velGainTable)[127] >= (*regions[0].velGainTable)[1]);
+
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  auto& sample = loaded->instruments[0].regions[0].sample;
+  REQUIRE(sample.data);
+  REQUIRE(approxEq(sample.data->size(), std::size_t(2)));
+  REQUIRE(approxEq((*sample.data)[0].size(), std::size_t(FRAMES)));
+}
+
+// DLS converters name instruments "Single-Region Instrument" and the like:
+// the program number is shown instead, real names are kept
+TEST_CASE("loader: dls_placeholder_instrument_names", "[deuterium]")
+{
+  REQUIRE(isPlaceholderInstrumentName(""));
+  REQUIRE(isPlaceholderInstrumentName("Single-Region Instrument"));
+  REQUIRE(isPlaceholderInstrumentName("Multi-Region Instrument"));
+  REQUIRE(isPlaceholderInstrumentName("Instrument 12"));
+  REQUIRE(isPlaceholderInstrumentName("Program 3"));
+  REQUIRE(isPlaceholderInstrumentName("Bank 1, Program 3"));
+  REQUIRE(!isPlaceholderInstrumentName("Electric Piano 1"));
+  REQUIRE(!isPlaceholderInstrumentName("Instrumental pad"));
+
+  const auto path
+      = makeDlsFile(tmp("placeholder.dls"), "Single-Region Instrument", 17);
+  const auto names = listInstruments(path);
+  REQUIRE(approxEq(names.size(), std::size_t(1)));
+  REQUIRE(approxEq(names[0], std::string("Program 17")));
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  REQUIRE(approxEq(info->instruments[0].name, std::string("Program 17")));
+
+  const auto named = makeDlsFile(tmp("named.dls"), "Glockenspiel", 9);
+  REQUIRE(approxEq(listInstruments(named)[0], std::string("Glockenspiel")));
+}
+
+// A gig with one instrument and one region over the given sample data
+// (interleaved 16-bit); `configure` sets up the instrument, region and
+// dimension regions before saving.
+QString makeCustomGig(
+    const QString& path, int channels, const std::vector<int16_t>& data,
+    const std::function<void(gig::Instrument*, gig::Region*, gig::Sample*)>& configure)
+{
+  const auto frames = data.size() / channels;
+  gig::File f;
+  f.pInfo->Name = "CustomBank";
+  gig::Sample* smp = f.AddSample();
+  smp->pInfo->Name = "CustomSample";
+  smp->Channels = channels;
+  smp->BitDepth = 16;
+  smp->FrameSize = 2 * channels;
+  smp->SamplesPerSecond = RATE;
+  smp->Resize(frames);
+
+  gig::Instrument* ins = f.AddInstrument();
+  ins->pInfo->Name = "CustomInstrument";
+  gig::Region* rgn = ins->AddRegion();
+  rgn->SetKeyRange(36, 84);
+  rgn->SetSample(smp);
+  rgn->pDimensionRegions[0]->pSample = smp;
+  configure(ins, rgn, smp);
+
+  f.Save(path.toStdString());
+  smp->SetPos(0);
+  smp->Write(const_cast<int16_t*>(data.data()), frames);
+  return path;
+}
+
+// Sample data is read in chunks (a single read of a compressed gig sample
+// stops at the decompression buffer): a long stereo sample comes back whole,
+// across the chunk boundaries
+TEST_CASE("loader: gig_long_sample_read_in_chunks", "[deuterium]")
+{
+  constexpr int frames = 200003; // 3 chunks of 65536 and a partial one
+  std::vector<int16_t> data(frames * 2);
+  for(int i = 0; i < frames; i++)
+  {
+    data[2 * i] = int16_t((i * 7) % 30000);
+    data[2 * i + 1] = int16_t(-((i * 5) % 30000));
+  }
+  const auto path = makeCustomGig(
+      tmp("long.gig"), 2, data, [](gig::Instrument*, gig::Region*, gig::Sample*) { });
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  auto& sample = loaded->instruments[0].regions[0].sample;
+  REQUIRE(sample.data);
+  REQUIRE(approxEq(sample.data->size(), std::size_t(2)));
+  REQUIRE(approxEq((*sample.data)[0].size(), std::size_t(frames)));
+  for(int i : {0, 65535, 65536, 65537, 131072, 196608, frames - 1})
+  {
+    INFO("frame " << i);
+    REQUIRE(std::abs((*sample.data)[0][i] - data[2 * i] / 32768.0) < 1e-9);
+    REQUIRE(std::abs((*sample.data)[1][i] - data[2 * i + 1] / 32768.0) < 1e-9);
+  }
+}
+
+// The gig features the engine follows reach the regions: EG1 pre-attack and
+// decay 2, the filter type / key tracking / EG2 / LFO2, the layer crossfade,
+// the release triggers' decay, the bend range and the instrument fine tune
+TEST_CASE("loader: gig_region_features", "[deuterium]")
+{
+  const auto path = makeCustomGig(
+      tmp("features.gig"), 1, std::vector<int16_t>(FRAMES, 1000),
+      [](gig::Instrument* ins, gig::Region* rgn, gig::Sample* smp) {
+    ins->PitchbendRange = 7;
+    ins->FineTune = 10;
+    gig::dimension_def_t def{};
+    def.dimension = gig::dimension_releasetrigger;
+    def.bits = 1;
+    def.zones = 2;
+    rgn->AddDimension(&def);
+    for(uint32_t z = 0; z < rgn->DimensionRegions; z++)
+    {
+      auto* dr = rgn->pDimensionRegions[z];
+      dr->pSample = smp;
+      dr->FineTune = 5;
+      dr->EG1PreAttack = 500;
+      dr->EG1InfiniteSustain = false;
+      dr->EG1Decay2 = 2.0;
+      dr->VCFEnabled = true;
+      dr->VCFType = gig::vcf_type_highpass;
+      dr->VCFKeyboardTracking = true;
+      dr->VCFKeyboardTrackingBreakpoint = 60;
+      dr->EG2Sustain = 500;
+      dr->LFO2InternalDepth = 600;
+      dr->LFO2Frequency = 2.0;
+      dr->AttenuationController.type = gig::attenuation_ctrl_t::type_velocity;
+      dr->Crossfade.in_start = 0;
+      dr->Crossfade.in_end = 0;
+      dr->Crossfade.out_start = 40;
+      dr->Crossfade.out_end = 80;
+      dr->ReleaseTriggerDecay = 3;
+    }
+  });
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  REQUIRE(info->instruments[0].pitchbendRange == 7);
+  auto& regions = info->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(2)));
+  int releases = 0;
+  for(auto& r : regions)
+  {
+    CHECK(r.sample.fineTune == 15);
+    CHECK(std::abs(r.eg1PreAttack - 0.5) < 1e-6);
+    CHECK(std::abs(r.eg1Decay2 - 2.0) < 0.1);
+    CHECK(r.vcfEnabled);
+    CHECK(r.vcfType == SamplerParams::FilterHighpass);
+    CHECK(r.vcfKeytrackBreakpoint == 60);
+    CHECK(r.vcfVelTable);
+    CHECK(r.gigCutoffEnv);
+    CHECK(std::abs(r.eg2Sustain - 0.5f) < 1e-6);
+    CHECK(std::abs(r.gigLfo2Depth - 0.5f) < 1e-6);
+    CHECK(r.velGainTable);
+    CHECK(r.xfadeSource == -2);
+    CHECK(int(r.xfadeOutStart) == 40);
+    CHECK(int(r.xfadeOutEnd) == 80);
+    if(r.releaseTrigger)
+    {
+      releases++;
+      CHECK(std::abs(r.releaseTriggerDecay - 0.01053 * (256 >> 3)) < 1e-9);
+    }
+    else
+      CHECK(r.releaseTriggerDecay == 0.);
+  }
+  CHECK(releases == 1);
+  // Every region of the instrument shares the one velocity curve it uses
+  CHECK(regions[0].velGainTable == regions[1].velGainTable);
+}
+
+// A loop only on the sample (smpl chunk), not on the region (wsmp): gig
+// players do not loop it (Sonic Implants Fender Strat)
+TEST_CASE("loader: gig_sample_level_loop_is_not_played", "[deuterium]")
+{
+  const auto path = makeCustomGig(
+      tmp("smplloop.gig"), 1, std::vector<int16_t>(FRAMES, 1000),
+      [](gig::Instrument*, gig::Region*, gig::Sample* smp) {
+    smp->Loops = 1;
+    smp->LoopType = gig::loop_type_normal;
+    smp->LoopStart = 10;
+    smp->LoopEnd = 200;
+    smp->LoopSize = 190;
+  });
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  CHECK_FALSE(info->instruments[0].regions[0].sample.hasLoop);
+}
+
+// Separate left / right mono samples in the sample-channel dimension both
+// play (only a stereo sample shared by both zones plays once), and with a
+// velocity dimension on top every region still gets its own buffer
+TEST_CASE("loader: gig_separate_channel_samples_stay_aligned", "[deuterium]")
+{
+  const QString path = tmp("lr_vel.gig");
+  {
+    gig::File f;
+    std::vector<gig::Sample*> smps;
+    for(int i = 0; i < 4; i++)
+    {
+      gig::Sample* smp = f.AddSample();
+      smp->Channels = 1;
+      smp->BitDepth = 16;
+      smp->FrameSize = 2;
+      smp->SamplesPerSecond = RATE;
+      smp->Resize(FRAMES);
+      smps.push_back(smp);
+    }
+    gig::Instrument* ins = f.AddInstrument();
+    gig::Region* rgn = ins->AddRegion();
+    rgn->SetKeyRange(36, 84);
+    rgn->SetSample(smps[0]);
+    gig::dimension_def_t ch{};
+    ch.dimension = gig::dimension_samplechannel;
+    ch.bits = 1;
+    ch.zones = 2;
+    rgn->AddDimension(&ch);
+    gig::dimension_def_t vel{};
+    vel.dimension = gig::dimension_velocity;
+    vel.bits = 1;
+    vel.zones = 2;
+    rgn->AddDimension(&vel);
+    // Dimension region index: bit 0 = channel, bit 1 = velocity zone
+    for(uint32_t d = 0; d < rgn->DimensionRegions; d++)
+      rgn->pDimensionRegions[d]->pSample = smps[d];
+    f.Save(path.toStdString());
+    for(int i = 0; i < 4; i++)
+    {
+      std::vector<int16_t> data(FRAMES, int16_t(1000 * (i + 1)));
+      smps[i]->SetPos(0);
+      smps[i]->Write(data.data(), FRAMES);
+    }
+  }
+  auto info = loadGigFileMetadata(path);
+  REQUIRE(info);
+  REQUIRE(approxEq(info->instruments[0].regions.size(), std::size_t(4)));
+  auto loaded = loadGigFileSamples(info, RATE, {});
+  REQUIRE(loaded);
+  auto& regions = loaded->instruments[0].regions;
+  REQUIRE(approxEq(regions.size(), std::size_t(4)));
+  std::set<int> levels;
+  for(auto& r : regions)
+  {
+    REQUIRE(r.sample.data);
+    const int level = (int)std::lround((*r.sample.data)[0][10] * 32768.0 / 1000.0);
+    levels.insert(level);
+    // Low velocity zone: samples 1 and 2 (d = 0, 1), high: 3 and 4
+    if(r.velHigh < 127)
+      CHECK((level == 1 || level == 2));
+    else
+      CHECK((level == 3 || level == 4));
+  }
+  CHECK(levels == std::set<int>{1, 2, 3, 4});
+}
+
 TEST_CASE("loader: gig_samples", "[deuterium]")
 {
   const auto path = makeGigFile(tmp("samples.gig"));
@@ -815,8 +1181,8 @@ TEST_CASE("loader: gig_round_robin_dimension", "[deuterium]")
   REQUIRE(approxEq(lr[0].sample.data.get(), lr[1].sample.data.get()));
 }
 
-// libgig LoopEnd is an inclusive last-sample index; the engine's loop.end
-// is exclusive, so the loader converts
+// The gig loop is the dimension region's wsmp loop (start + length); the
+// engine's loop.end is exclusive
 TEST_CASE("loader: gig_loop_end_is_converted_to_exclusive", "[deuterium]")
 {
   const auto path = makeGigFile(tmp("loopend.gig"), {}, 100, 200);

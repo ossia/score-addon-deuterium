@@ -58,9 +58,9 @@ struct UiBuilder final : Process::LayoutBuilderBase
       item.container->setParentItem(parent);
   }
 
-  // Float controls as knobs in a fixed-size cell (label above, port dot on
-  // the left): denser and uniform. Everything else falls back to the
-  // inlet's own widget.
+  // Float controls as knobs, integers as spin boxes and toggles as a check
+  // box, in a fixed-height cell (label above, port dot on the left): denser
+  // and uniform. Everything else falls back to the inlet's own widget.
   void knobOrControl(QGraphicsItem* parent, int samplerControl)
   {
     static constexpr qreal cell_w = 50., cell_h = 60.;
@@ -87,10 +87,21 @@ struct UiBuilder final : Process::LayoutBuilderBase
     cell->setRect({0., 0., cell_w, cell_h});
 
     QGraphicsItem* w{};
+    qreal wy = 6.; // same widget y as DefaultControlLayouts::knob()
     if(dynamic_cast<Process::LogFloatSlider*>(ctl))
       w = WidgetFactory::LogFloatKnob::make_item(range, *ctl, doc, cell, &context);
     else if(dynamic_cast<Process::FloatSlider*>(ctl))
       w = WidgetFactory::FloatKnob::make_item(range, *ctl, doc, cell, &context);
+    else if(auto* is = dynamic_cast<Process::IntSlider*>(ctl))
+    {
+      w = WidgetFactory::IntSpinBox::make_item(*is, *is, doc, cell, &context);
+      wy = 16.;
+    }
+    else if(auto* tg = dynamic_cast<Process::Toggle*>(ctl))
+    {
+      w = WidgetFactory::Toggle::make_item(*tg, *tg, doc, cell, &context);
+      wy = 17.;
+    }
     if(!w)
     {
       // Non-float control: wrap its standard port item in a same-height cell,
@@ -109,14 +120,16 @@ struct UiBuilder final : Process::LayoutBuilderBase
       return;
     }
     w->setParentItem(cell);
-    // Same widget y as DefaultControlLayouts::knob() so the knobs of a row
-    // line up with the controls built through makePort
-    w->setPos((cell_w - 35.) / 2., 6.);
-
     auto* lab = makeLabel(ctl->name().toStdString());
     lab->setParentItem(cell);
     const auto lw = lab->boundingRect().width();
-    lab->setPos(std::max(0., (cell_w - lw) / 2.), 0.);
+    // Wide enough for the label and the widget next to the port dot
+    const auto ww = w->boundingRect().width();
+    const qreal cw = std::max({cell_w, lw + 6., ww + 24.});
+    cell->setRect({0., 0., cw, cell_h});
+    // Knobs keep their y so a row lines up with controls built by makePort
+    w->setPos((cw - ww) / 2. + 4., wy);
+    lab->setPos(std::max(0., (cw - lw) / 2.), 0.);
 
     if(auto* pf = portFactory.get(ctl->concreteKey()))
       if(auto* dot = pf->makePortItem(
@@ -311,6 +324,7 @@ private:
     tabs->addTab(QStringLiteral(" Filter "));
     tabs->addTab(QStringLiteral(" Amp "));
     tabs->addTab(QStringLiteral(" Mod "));
+    tabs->addTab(QStringLiteral(" Voices "));
 
     {
       auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
@@ -346,7 +360,15 @@ private:
       auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
       page->setBrush(skin.Background2.main);
       b.grid(page, 4, {LfoDest, LfoRate, LfoDepth, LfoDelay});
-      b.grid(page, 4, {VoiceMode, Glide, Polyphony});
+    }
+    {
+      // Voicing and glide: the choices on the left, their amounts on the
+      // right, a row each (how notes take the voices / how they connect)
+      auto* page = b.start<score::GraphicsVBoxLayout>(tabs, 3.);
+      page->setBrush(skin.Background2.main);
+      auto* row = b.start<score::GraphicsHBoxLayout>(page, 0.);
+      b.grid(row, 2, {VoiceMode, NotePriority, GlideType, PolyGlideFrom});
+      b.grid(row, 3, {Polyphony, MonoFade, PerChannel, Glide, MaxInterval, ChordWindow});
     }
 
     // Trigger strip: compact keyboard / pads showing the mapped notes;

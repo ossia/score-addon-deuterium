@@ -50,19 +50,66 @@ struct SamplerParams
   float velToCutoff{0.f}; // 0..1
 
   float velAmount{1.f};  // 0..1: how much velocity scales the gain
-  int velCurve{2};       // 0 linear, 1 soft (sqrt), 2 hard (v^2, the SF2
-                         // default velocity-to-attenuation curve)
+  int velCurve{3};       // 0 linear, 1 soft (sqrt), 2 hard (v^2, the SF2
+                         // default velocity-to-attenuation curve), 3 the
+                         // file's own curve (gig), hard otherwise
   float velToStart{0.f}; // 0..1: softer hits start later in the sample
   float velXfade{0.f};   // 0..1: crossfade across velocity-zone edges
 
+  // The fingered modes only glide into a note struck while another key is
+  // still held (fingered portamento): detached notes start at their pitch
   enum VoiceMode
   {
     Poly,
     Mono,
-    Legato
+    Legato,
+    MonoFingered,
+    LegatoFingered,
+    // Two lines: the lowest and the highest held key, each legato
+    Duophonic,
+    // Poly, each new note gliding from a previous one (paired by pitch)
+    PolyGlide,
+    // Poly, each new note continuing the nearest held line (paired by
+    // pitch, within the max interval); others start new lines
+    PolyLegato
   };
   int voiceMode{Poly};
-  float glide{0.f}; // seconds, mono/legato only
+
+  // Mono family: which held key sounds
+  enum NotePriority
+  {
+    PriorityLast,
+    PriorityHighest,
+    PriorityLowest
+  };
+  int notePriority{PriorityLast};
+  // Poly glide / legato: notes further apart are never paired (semitones)
+  int maxInterval{12};
+  // Poly glide / legato: notes struck within this many seconds form a chord,
+  // paired in pitch order with the previous one once the window closes (the
+  // notes wait for it); 0 = paired as they come, with the nearest
+  float chordWindow{0.f};
+  // Poly glide: where new notes glide from
+  enum PolyGlideFrom
+  {
+    GlideFromNearest, // the nearest sounding note, pitch-order pairing
+    GlideFromLast     // the last note struck
+  };
+  int polyGlideFrom{GlideFromNearest};
+  // One line per MIDI channel for the mono modes (and pairing within each
+  // channel for the poly ones); per-channel pitch bend. MPE.
+  bool perChannel{false};
+  float glide{0.f}; // seconds; the mono-style and poly glide / legato modes
+  enum GlideType
+  {
+    GlideRateOctave, // Glide = time per octave
+    GlideRateTone,   // Glide = time per whole tone
+    GlideTime,       // Glide = time of the whole glide
+    GlideExponential // analog-style lag reaching 99% after Glide
+  };
+  int glideType{GlideRateOctave};
+  // Mono/legato: fade-out of the voice a new note replaces, in seconds
+  float monoFade{0.01f};
   int polyphony{64};
 
   float startOffset{0.f}; // 0..1 of the sample length
@@ -142,9 +189,11 @@ inline double velocityGain(const GigRegion& r, const SamplerParams& p, int veloc
   if(!r.applyVelocity)
     return 1.0;
   double v = std::clamp(velocity, 0, 127) / 127.0;
-  if(p.velCurve == 1)
+  if(p.velCurve == 3 && r.velGainTable)
+    v = (*r.velGainTable)[std::clamp(velocity, 0, 127)];
+  else if(p.velCurve == 1)
     v = std::sqrt(v); // soft: quiet hits come up
-  else if(p.velCurve == 2)
+  else if(p.velCurve >= 2)
     v = v * v; // hard: exaggerated dynamics
   const double amount = std::clamp<double>(p.velAmount, 0., 1.);
   return 1.0 + amount * (v - 1.0);
@@ -165,6 +214,40 @@ inline double velocityZoneGain(const GigRegion& r, int velocity, double xfade01)
     distance = velocity - r.velHigh;
   return std::max(0., 1. - distance / w);
 }
+
+// gig layer crossfade: the controller value goes through the region's
+// fade-in / fade-out ramps, then an equal-power curve
+inline double gigCrossfadeGain(const GigRegion& r, int value) noexcept
+{
+  if(r.xfadeSource == -1)
+    return 1.;
+  int x = std::clamp(value, 0, 127);
+  if(r.xfadeInvert)
+    x = 127 - x;
+  const auto ramp = [](int x, int from, int to) {
+    return to > from ? double(x - from) / double(to - from) : 1.;
+  };
+  double a;
+  if(x < r.xfadeInStart)
+    a = 0.;
+  else if(x < r.xfadeInEnd)
+    a = ramp(x, r.xfadeInStart, r.xfadeInEnd);
+  else if(x <= r.xfadeOutStart)
+    a = 1.;
+  else if(x < r.xfadeOutEnd)
+    a = 1. - ramp(x, r.xfadeOutStart, r.xfadeOutEnd);
+  else
+    a = 0.;
+  return std::sin(std::clamp(a, 0., 1.) * (M_PI / 2.));
+}
+
+// gig cutoff units (0..127) <-> Hz: 20 Hz - 20 kHz, exponentially
+inline double gigCutoffToHz(double units) noexcept
+{
+  return 20.0 * std::pow(1000.0, std::clamp(units, 0., 127.) / 127.0);
+}
+// Cents per cutoff unit of the mapping above: 1200 * log2(1000) / 127
+inline constexpr double gigCentsPerCutoffUnit = 94.15880;
 
 // Static pitch of a note on a region under the params, in semitones
 // (live modulation - bend, LFO, pitch envelope, glide - comes on top)
@@ -216,6 +299,11 @@ struct AmpEnv
   void sustain(double lin) noexcept { m_sustain = std::clamp(lin, 0., 1.); }
   void release(double s) noexcept { m_release = std::max(1e-4, s); }
   void dbMode(bool b) noexcept { m_dbMode = b; }
+  //! Level the attack starts from (gig EG1 pre-attack), 0..1
+  void preAttack(double lin) noexcept { m_preAttack = std::clamp(lin, 0., 1.); }
+  //! Fall from the sustain level to silence while the key is held, over this
+  //! many seconds (gig EG1 decay 2); < 0 = the sustain level holds
+  void decay2(double s) noexcept { m_decay2 = s; }
   //! No sustain: after the decay the envelope goes on to its release by
   //! itself, for notes whose note-off is ignored.
   void oneShot(bool b) noexcept { m_oneShot = b; }
@@ -228,6 +316,8 @@ struct AmpEnv
   void reset() noexcept
   {
     m_oneShot = false;
+    m_preAttack = 0.;
+    m_decay2 = -1.;
     m_stage = Delay;
     m_amp = 0.;
     m_counter = 0;
@@ -272,16 +362,20 @@ struct AmpEnv
           if(m_counter <= 0)
           {
             m_stage = Attack;
+            m_amp = m_preAttack;
             return (*this)();
           }
         }
         if(--m_counter <= 0)
+        {
           m_stage = Attack;
+          m_amp = m_preAttack;
+        }
         return 0.;
 
       case Attack:
       {
-        const double inc = 1. / std::max(1., m_attack * m_rate);
+        const double inc = (1. - m_preAttack) / std::max(1., m_attack * m_rate);
         m_amp += inc;
         if(m_amp >= 1.)
         {
@@ -302,7 +396,7 @@ struct AmpEnv
         if(m_amp <= m_sustainAmp)
         {
           m_amp = m_sustainAmp;
-          m_stage = Sustain;
+          enterSustain();
           if(m_oneShot)
             startRelease();
         }
@@ -318,6 +412,15 @@ struct AmpEnv
       case Sustain:
         if(m_oneShot)
           startRelease();
+        else if(m_decay2 >= 0.)
+        {
+          m_amp *= m_mul;
+          if(m_amp <= silence_amp)
+          {
+            m_amp = 0.;
+            m_stage = Done;
+          }
+        }
         return m_amp;
 
       case Release:
@@ -341,8 +444,8 @@ private:
     m_sustainAmp = m_sustain;
     if(m_sustainAmp >= 1.)
     {
-      m_stage = Sustain;
       m_amp = 1.;
+      enterSustain();
       return;
     }
     const double decSamples = std::max(1., m_decay * m_rate);
@@ -361,7 +464,17 @@ private:
     m_stage = Decay;
   }
 
+  void enterSustain() noexcept
+  {
+    m_stage = Sustain;
+    // Decay 2: reach silence after exactly its time from the sustain level
+    if(m_decay2 >= 0. && m_amp > silence_amp)
+      m_mul = std::pow(silence_amp / m_amp, 1. / std::max(1., m_decay2 * m_rate));
+  }
+
   double m_rate{48000.};
+  double m_preAttack{};
+  double m_decay2{-1.};
   double m_delay{}, m_attack{0.001}, m_hold{}, m_decay{0.001}, m_release{0.016};
   double m_sustain{1.};
   double m_amp{};
@@ -643,10 +756,10 @@ struct BlockEnv
   int stage{Idle};
   double value{};
 
-  void trigger() noexcept
+  void trigger(double startLevel = 0.) noexcept
   {
     stage = Attack;
-    value = 0.;
+    value = std::clamp(startLevel, 0., 1.);
   }
   void release() noexcept
   {
@@ -758,11 +871,18 @@ pickAlternative(int count, int policy, uint8_t& counter, uint32_t& rng) noexcept
   return r;
 }
 
-// Glide: linear semitone slew from the previous note's pitch
+// Glide from the previous note's pitch, in semitones. The glide type says
+// what the Glide time means (SamplerParams::GlideType):
+// - constant rate: the time for an octave, or for a whole tone; the glide
+//   lasts longer the larger the interval
+// - constant time: the whole glide, whatever the interval
+// - exponential: analog-style lag, fast first then slowing down; the Glide
+//   time covers 99% of the interval
 struct GlideState
 {
   double current{};
   double target{};
+  double span{}; // interval at the start, for constant time
   bool active{};
 
   void start(double from, double to, bool glideEnabled) noexcept
@@ -771,6 +891,7 @@ struct GlideState
     if(glideEnabled)
     {
       current = from;
+      span = std::abs(to - from);
       active = true;
     }
     else
@@ -780,15 +901,30 @@ struct GlideState
     }
   }
 
-  double advanceBlock(double blockFrames, double glideSeconds, double sampleRate) noexcept
+  double advanceBlock(
+      double blockFrames, double glideSeconds, double sampleRate,
+      int type = 0) noexcept
   {
-    if(!active || glideSeconds <= 0.)
+    if(!active || glideSeconds <= 0. || sampleRate <= 0.)
     {
       current = target;
       active = false;
       return current;
     }
-    const double step = 12.0 * blockFrames / (glideSeconds * sampleRate);
+    const double fraction = blockFrames / (glideSeconds * sampleRate);
+    if(type == 3) // exponential: e^-ln(100) = 1% left after the Glide time
+    {
+      current += (target - current) * (1. - std::exp(-std::log(100.) * fraction));
+      if(std::abs(target - current) < 0.01) // within a cent
+      {
+        current = target;
+        active = false;
+      }
+      return current;
+    }
+    const double step = type == 1   ? 2.0 * fraction  // a tone per Glide time
+                        : type == 2 ? span * fraction // the interval
+                                    : 12.0 * fraction; // an octave
     if(std::abs(target - current) <= step)
     {
       current = target;

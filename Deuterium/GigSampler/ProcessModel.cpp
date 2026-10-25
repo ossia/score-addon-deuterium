@@ -52,7 +52,10 @@ ProcessModel::ProcessModel(
   m_instrument = parsed.instrument;
   wireInstrumentControl();
   if(!m_filePath.isEmpty())
+  {
+    m_applyFileDefaults = true;
     startAsyncLoad();
+  }
 }
 
 // The Instrument inlet drives which instrument of the file plays: changing
@@ -76,6 +79,7 @@ void ProcessModel::wireInstrumentControl()
       return;
     m_instrument = i;
     m_gigInfo.reset();
+    m_applyFileDefaults = true;
     if(!m_filePath.isEmpty())
       startAsyncLoad();
     else
@@ -99,6 +103,7 @@ void ProcessModel::wireInstrumentControl()
       return;
     // Keep the instrument index: swapping between similar banks keeps the
     // whole setup; out-of-range indices play silently until changed.
+    m_applyFileDefaults = true;
     loadFile(path, m_instrument);
   });
 }
@@ -231,11 +236,44 @@ void ProcessModel::startAsyncLoad()
                 return;
 
               if(loaded)
+              {
                 self->m_gigInfo = std::move(loaded);
+                if(self->m_applyFileDefaults)
+                  self->applyFileDefaults();
+              }
+              self->m_applyFileDefaults = false;
               self->fileChanged();
             },
             Qt::QueuedConnection);
       });
 }
 
+}
+
+namespace Deuterium::Gig
+{
+void ProcessModel::applyFileDefaults()
+{
+  if(!m_gigInfo || m_gigInfo->selectedInstrument < 0
+     || m_gigInfo->selectedInstrument >= std::ssize(m_gigInfo->instruments))
+    return;
+  const auto& instr = m_gigInfo->instruments[m_gigInfo->selectedInstrument];
+
+  if(const int idx = 1 + Gig::BendRange;
+     instr.pitchbendRange >= 0 && idx < std::ssize(m_inlets))
+    if(auto* ctl = qobject_cast<Process::ControlInlet*>(m_inlets[idx]))
+    {
+      // A range the user chose (also while the bank loaded, or before an
+      // undo brought another bank back) is kept
+      const float current = ossia::convert<float>(ctl->value());
+      const float untouched
+          = m_bankBendRange.value_or(ossia::convert<float>(ctl->init()));
+      if(current != untouched)
+        return;
+      const float range = std::clamp<float>(instr.pitchbendRange, 0.f, 24.f);
+      m_bankBendRange = range;
+      if(current != range)
+        ctl->setValue(range);
+    }
+}
 }

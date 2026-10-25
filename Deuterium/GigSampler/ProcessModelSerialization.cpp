@@ -25,17 +25,20 @@ constexpr int32_t deuteriumStreamMarker = 0x44544D31;
 // serialization friends, which can reach the inlet list.
 void ensureControls(Deuterium::Gig::ProcessModel& proc, Process::Inlets& inlets)
 {
-  const std::size_t expected = 1 + Deuterium::Gig::ControlCount;
-  if(inlets.size() >= expected)
-    return;
-
   const std::size_t have = inlets.size();
   auto all = Deuterium::Gig::makeSamplerControls(&proc);
   for(std::size_t c = 0; c < all.size(); c++)
   {
     if(1 + c < have)
     {
-      delete all[c]; // this position was restored from the document
+      // This position was restored from the document. A combobox saves its
+      // entries along with its value: give it the current ones, or entries
+      // added since (new Voices modes...) never show up in older documents.
+      auto* restored = qobject_cast<Process::ComboBox*>(inlets[1 + c]);
+      auto* fresh = qobject_cast<Process::ComboBox*>(all[c]);
+      if(restored && fresh && restored->alternatives != fresh->alternatives)
+        restored->setAlternatives(fresh->alternatives);
+      delete all[c];
     }
     else
     {
@@ -44,6 +47,13 @@ void ensureControls(Deuterium::Gig::ProcessModel& proc, Process::Inlets& inlets)
       // those sliders authoritative instead of the new toggle's default.
       if(int(c) == Deuterium::Gig::EnvFromFile)
         all[c]->setValue(false);
+      // Older documents: the behaviour they were made with. Notes replaced
+      // by mono / legato faded over 0.3 s, and velocity followed the hard
+      // curve whatever the bank.
+      if(int(c) == Deuterium::Gig::MonoFade)
+        all[c]->setValue(ossia::vec2f{0.3f, 0.f});
+      if(int(c) == Deuterium::Gig::VelCurve)
+        all[c]->setValue(2);
       inlets.push_back(all[c]);
     }
   }

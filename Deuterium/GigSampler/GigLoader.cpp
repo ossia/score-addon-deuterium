@@ -7,6 +7,7 @@
 #include <QDirIterator>
 #include <QXmlStreamReader>
 #include <QHash>
+#include <QRegularExpression>
 #include <QSet>
 #include <QFile>
 #include <QFileInfo>
@@ -264,6 +265,29 @@ void sanitizeRegion(GigRegion& r)
       = std::isfinite(r.pitchOffset) ? std::clamp(r.pitchOffset, -60., 60.) : 0.;
   r.randomPitch
       = std::isfinite(r.randomPitch) ? std::clamp(r.randomPitch, 0., 12.) : 0.;
+  r.eg1PreAttack
+      = std::isfinite(r.eg1PreAttack) ? std::clamp(r.eg1PreAttack, 0., 1.) : 0.;
+  // < 0 = sustain held; huge or NaN decay times from corrupt files as well
+  r.eg1Decay2 = std::isfinite(r.eg1Decay2) && r.eg1Decay2 >= 0. && r.eg1Decay2 < 600.
+                    ? r.eg1Decay2
+                    : -1.;
+  r.releaseTriggerDecay = std::isfinite(r.releaseTriggerDecay)
+                              ? std::clamp(r.releaseTriggerDecay, 0., 100.)
+                              : 0.;
+  const auto envTime
+      = [](float t) { return std::isfinite(t) ? std::clamp(t, 0.f, 120.f) : 0.f; };
+  r.eg2Attack = envTime(r.eg2Attack);
+  r.eg2Decay = envTime(r.eg2Decay);
+  r.eg2Release = envTime(r.eg2Release);
+  r.eg2Sustain = std::isfinite(r.eg2Sustain) ? std::clamp(r.eg2Sustain, 0.f, 1.f) : 1.f;
+  r.eg2PreAttack
+      = std::isfinite(r.eg2PreAttack) ? std::clamp(r.eg2PreAttack, 0.f, 1.f) : 0.f;
+  r.gigLfo2Freq
+      = std::isfinite(r.gigLfo2Freq) ? std::clamp(r.gigLfo2Freq, 0.f, 50.f) : 1.f;
+  r.gigLfo2Depth
+      = std::isfinite(r.gigLfo2Depth) ? std::clamp(r.gigLfo2Depth, 0.f, 1.f) : 0.f;
+  if(r.vcfKeytrackBreakpoint > 127)
+    r.vcfKeytrackBreakpoint = -1;
   r.sample.fineTune = std::clamp(r.sample.fineTune, -1200, 1200);
   // The engine subtracts this from the note and exponentiates the result:
   // out-of-range values from corrupt files would blow up the pitch ratio
@@ -980,8 +1004,23 @@ bool gigZoneIsUnselected(const gig::Region* rgn, uint32_t d)
       case gig::dimension_random:
       case gig::dimension_releasetrigger:
       case gig::dimension_layer:
-      case gig::dimension_samplechannel:
         break;
+      case gig::dimension_samplechannel:
+      {
+        // A stereo sample sits in both channel zones (one voice of it plays
+        // both channels, like LinuxSampler): only separate per-channel
+        // samples stack
+        const int mask = (1 << rgn->pDimensionDefinitions[dim].bits) - 1;
+        if(((d >> bitsBelow) & mask) != 0)
+        {
+          const uint32_t d0 = d & ~(uint32_t(mask) << bitsBelow);
+          const auto* dr = rgn->pDimensionRegions[d];
+          const auto* dr0 = d0 < rgn->DimensionRegions ? rgn->pDimensionRegions[d0] : nullptr;
+          if(dr && dr0 && dr->pSample == dr0->pSample)
+            return true;
+        }
+        break;
+      }
       default:
       {
         const int mask = (1 << rgn->pDimensionDefinitions[dim].bits) - 1;
@@ -1033,6 +1072,22 @@ loadMetadata_gig(const QString& filePath, gig::File* gigFile, int instrumentInde
     return {};
 
   auto& destInstr = info->instruments[instrumentIndex];
+
+  // Velocity tables, shared between the regions that use the same curve
+  // (a handful per instrument against thousands of regions)
+  std::vector<std::shared_ptr<const std::array<float, 128>>> velTables;
+  const auto velocityTable = [&](auto&& at) {
+    std::array<float, 128> t;
+    for(int v = 0; v < 128; v++)
+    {
+      const double x = at(v);
+      t[v] = std::isfinite(x) ? (float)std::max(0., x) : 1.f;
+    }
+    for(const auto& known : velTables)
+      if(*known == t)
+        return known;
+    return velTables.emplace_back(std::make_shared<const std::array<float, 128>>(t));
+  };
 
   gig::Region* rgn = gigInstr->GetFirstRegion();
   while(rgn)
@@ -1123,11 +1178,19 @@ loadMetadata_gig(const QString& filePath, gig::File* gigFile, int instrumentInde
         }
       }
 
-      // EG1 (Amplitude envelope)
+      // EG1 (Amplitude envelope). Without infinite sustain the level keeps
+      // falling from the sustain level to silence over Decay2.
       region.eg1Attack = dimRgn->EG1Attack;
       region.eg1Decay = dimRgn->EG1Decay1;
       region.eg1Sustain = dimRgn->EG1Sustain / 1000.0; // 0-1000 -> 0.0-1.0
       region.eg1Release = dimRgn->EG1Release;
+      region.eg1PreAttack = dimRgn->EG1PreAttack / 1000.0;
+      if(!dimRgn->EG1InfiniteSustain)
+        region.eg1Decay2 = dimRgn->EG1Decay2;
+
+      // The file's velocity response (curve, depth, scaling)
+      region.velGainTable = velocityTable(
+          [&](int v) { return dimRgn->GetVelocityAttenuation(uint8_t(v)); });
 
       // Filter. When the cutoff is bound to a MIDI controller, the stored
       // byte is only the controller's fallback value (often 0): without
@@ -1139,6 +1202,63 @@ loadMetadata_gig(const QString& filePath, gig::File* gigFile, int instrumentInde
       else
         region.vcfCutoff = dimRgn->VCFCutoff;
       region.vcfResonance = dimRgn->VCFResonance;
+      if(region.vcfEnabled)
+      {
+        switch(dimRgn->VCFType)
+        {
+          case gig::vcf_type_highpass:
+          case gig::vcf_type_highpass_1p:
+          case gig::vcf_type_highpass_2p:
+          case gig::vcf_type_highpass_4p:
+          case gig::vcf_type_highpass_6p:
+            region.vcfType = 3; // SamplerParams::FilterHighpass
+            break;
+          case gig::vcf_type_bandpass:
+          case gig::vcf_type_bandpass_2p:
+            region.vcfType = 4; // SamplerParams::FilterBandpass
+            break;
+          case gig::vcf_type_bandreject:
+          case gig::vcf_type_bandreject_2p:
+            region.vcfType = 5; // SamplerParams::FilterNotch
+            break;
+          default:
+            region.vcfType = 2; // SamplerParams::FilterLowpass
+            break;
+        }
+        // Cutoff = VCFCutoff * velocity factor * key tracking, then scaled
+        // by EG2 and LFO2 (LinuxSampler's gig voice)
+        region.vcfVelTable = velocityTable(
+            [&](int v) { return dimRgn->GetVelocityCutoff(uint8_t(v)); });
+        if(dimRgn->VCFKeyboardTracking)
+          region.vcfKeytrackBreakpoint = dimRgn->VCFKeyboardTrackingBreakpoint;
+        region.gigCutoffEnv = true;
+        region.eg2PreAttack = dimRgn->EG2PreAttack / 1000.f;
+        region.eg2Attack = dimRgn->EG2Attack;
+        region.eg2Decay = dimRgn->EG2Decay1;
+        region.eg2Sustain = dimRgn->EG2Sustain / 1000.f;
+        region.eg2Release = dimRgn->EG2Release;
+        region.gigLfo2Depth = std::clamp(dimRgn->LFO2InternalDepth / 1200.f, 0.f, 1.f);
+        region.gigLfo2Freq = dimRgn->LFO2Frequency;
+      }
+
+      // Layer crossfade, by velocity or by a MIDI controller. A controller
+      // with an empty crossfade only marks the layer as controllable.
+      const auto& xf = dimRgn->Crossfade;
+      const auto att = dimRgn->AttenuationController;
+      if(att.type != gig::attenuation_ctrl_t::type_none && xf.out_end > 0)
+      {
+        if(att.type == gig::attenuation_ctrl_t::type_velocity)
+          region.xfadeSource = -2;
+        else if(att.type == gig::attenuation_ctrl_t::type_controlchange)
+          region.xfadeSource = std::clamp<int>(att.controller_number, 0, 127);
+        else if(att.type == gig::attenuation_ctrl_t::type_channelaftertouch)
+          region.xfadeSource = 128; // channel pressure
+        region.xfadeInvert = dimRgn->InvertAttenuationController;
+        region.xfadeInStart = xf.in_start;
+        region.xfadeInEnd = xf.in_end;
+        region.xfadeOutStart = xf.out_start;
+        region.xfadeOutEnd = xf.out_end;
+      }
 
       // Playback
       region.pitchTrack = dimRgn->PitchTrack;
@@ -1147,19 +1267,27 @@ loadMetadata_gig(const QString& filePath, gig::File* gigFile, int instrumentInde
       region.sampleStartOffset = dimRgn->SampleStartOffset;
       if(rgn->KeyGroup > 0)
         region.chokeGroup = rgn->KeyGroup;
+      if(region.releaseTrigger)
+        region.releaseTriggerDecay = 0.01053 * (256 >> std::min<int>(dimRgn->ReleaseTriggerDecay, 8));
 
       // Sample metadata (but NOT the actual audio data)
       auto* smp = dimRgn->pSample;
       region.sample.sampleRate = smp->SamplesPerSecond;
-      region.sample.midiUnityNote = std::min<uint32_t>(smp->MIDIUnityNote, 127);
-      region.sample.fineTune = smp->FineTune;
-      if(smp->Loops > 0)
+      // Tuning and loops come from the dimension region's wsmp chunk, as in
+      // GigaStudio / LinuxSampler. The sample's smpl chunk can disagree,
+      // and its FineTune is a MIDIPitchFraction (unsigned fraction of a
+      // semitone), not cents.
+      region.sample.midiUnityNote = std::min<uint32_t>(dimRgn->UnityNote, 127);
+      region.sample.fineTune = dimRgn->FineTune + gigInstr->FineTune;
+      if(dimRgn->SampleLoops > 0 && dimRgn->pSampleLoops
+         && dimRgn->pSampleLoops[0].LoopLength > 0)
       {
+        const auto& loop = dimRgn->pSampleLoops[0];
         region.sample.hasLoop = true;
-        region.sample.loopStart = smp->LoopStart;
-        // libgig's LoopEnd is the inclusive last sample of the loop; the
-        // engine wraps at loop.end exclusively
-        region.sample.loopEnd = smp->LoopEnd + 1;
+        region.sample.loopStart = loop.LoopStart;
+        region.sample.loopEnd = loop.LoopStart + loop.LoopLength;
+        // The wsmp loop type is the DLS one (0 forward, 1 release); the
+        // direction is the sample's
         region.sample.loopType = static_cast<int>(smp->LoopType);
       }
       // sample.data left empty intentionally
@@ -1191,6 +1319,15 @@ bool collectRawBuffers_gig(
   // read and store each source only once
   std::unordered_map<const void*, std::size_t> seen;
 
+  using file_offset_t = RIFF::file_offset_t;
+  constexpr file_offset_t chunkFrames = 65536;
+  gig::buffer_t decompression = gig::Sample::CreateDecompressionBuffer(chunkFrames);
+  struct FreeBuffer
+  {
+    gig::buffer_t& b;
+    ~FreeBuffer() { gig::Sample::DestroyDecompressionBuffer(b); }
+  } freeDecompression{decompression};
+
   int regionIdx = 0;
   gig::Region* rgn = gigInstr->GetFirstRegion();
   while(rgn)
@@ -1220,22 +1357,35 @@ bool collectRawBuffers_gig(
       }
       else
       {
-        // Load raw sample data from the gig file
-        gig::buffer_t buf = smp->LoadSampleData();
-        if(buf.pStart && buf.Size > 0)
+        // Read the raw sample data in chunks: one Read() of a compressed
+        // sample decodes at most what the decompression buffer holds, so
+        // LoadSampleData() would silently truncate it
+        RawSampleBuffer raw;
+        const auto frameSize = smp->FrameSize;
+        const auto total = smp->SamplesTotal;
+        raw.data.resize(total * frameSize);
+        file_offset_t got = 0;
+        smp->SetPos(0);
+        while(got < total)
         {
-          RawSampleBuffer raw;
-          const auto* bytes = static_cast<const uint8_t*>(buf.pStart);
-          raw.data.assign(bytes, bytes + buf.Size);
+          const file_offset_t want = std::min<file_offset_t>(total - got, chunkFrames);
+          const file_offset_t n
+              = smp->Read(raw.data.data() + got * frameSize, want, &decompression);
+          if(n == 0)
+            break;
+          got += n;
+        }
+        raw.data.resize(got * frameSize);
+        if(got > 0)
+        {
           raw.channels = smp->Channels;
           raw.bitDepth = smp->BitDepth;
-          raw.totalSamples = smp->SamplesTotal;
+          raw.totalSamples = got;
           raw.sourceRate = smp->SamplesPerSecond;
           raw.regionIndices.push_back(regionIdx);
           seen[smp] = rawBuffers.size();
           rawBuffers.push_back(std::move(raw));
         }
-        smp->ReleaseSampleData();
       }
 
       regionIdx++;
@@ -1342,6 +1492,21 @@ void applyDlsArticulations(DLS::Articulator& art, GigRegion& region)
   }
 }
 
+// DLS rips and conversions (VGMTrans and the like) name every instrument
+// "Single-Region Instrument", "Instrument 3", ...: the bank and program
+// number are what tells them apart
+std::string dlsInstrumentName(DLS::Instrument* in)
+{
+  std::string name = in->pInfo ? in->pInfo->Name : std::string{};
+  if(!isPlaceholderInstrumentName(name))
+    return name;
+  std::string label = in->IsDrum ? "Drum kit " : "Program ";
+  label += std::to_string(in->MIDIProgram);
+  if(in->MIDIBank != 0)
+    label = "Bank " + std::to_string(in->MIDIBank) + ", " + label;
+  return label;
+}
+
 std::shared_ptr<GigFileInfo>
 loadMetadata_dls(const QString& filePath, DLS::File* dlsFile, int instrumentIndex)
 {
@@ -1350,14 +1515,13 @@ loadMetadata_dls(const QString& filePath, DLS::File* dlsFile, int instrumentInde
 
   if(dlsFile->pInfo)
     info->name = dlsFile->pInfo->Name;
-  if(info->name.empty())
+  if(info->name.empty() || info->name == "Instrument Set")
     info->name = QFileInfo(filePath).baseName().toStdString();
 
   for(auto* in = dlsFile->GetFirstInstrument(); in; in = dlsFile->GetNextInstrument())
   {
     GigInstrument instr;
-    if(in->pInfo)
-      instr.name = in->pInfo->Name;
+    instr.name = dlsInstrumentName(in);
     info->instruments.push_back(std::move(instr));
   }
 
@@ -2404,6 +2568,15 @@ ParsedInstrumentPath parseInstrumentPath(const QString& data)
   return {data, 0};
 }
 
+bool isPlaceholderInstrumentName(const std::string& name)
+{
+  static const QRegularExpression placeholder{QStringLiteral(
+      "^\\s*((single|multi)-region instrument|instrument( \\d+)?|drumset|"
+      "(bank \\d+, )?(program|drum kit) \\d+)?\\s*$"),
+      QRegularExpression::CaseInsensitiveOption};
+  return placeholder.match(QString::fromStdString(name)).hasMatch();
+}
+
 std::vector<std::string> listInstruments(const QString& filePath)
 {
   std::vector<std::string> names;
@@ -2444,7 +2617,7 @@ std::vector<std::string> listInstruments(const QString& filePath)
       case SampleFileFormat::Dls: {
         auto* f = bank->dls.get();
         for(auto* in = f->GetFirstInstrument(); in; in = f->GetNextInstrument())
-          names.push_back(in->pInfo ? in->pInfo->Name : std::string{});
+          names.push_back(dlsInstrumentName(in));
         break;
       }
       case SampleFileFormat::Sf2: {

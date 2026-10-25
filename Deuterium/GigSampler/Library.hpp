@@ -72,6 +72,18 @@ class LibraryHandler final
     // Drumkits are named after their folder, not the generic "drumkit.xml"
     if(format == QStringLiteral("Drumkit") && !instruments[0].empty())
       pdata.prettyName = QString::fromStdString(instruments[0]);
+    // A single-instrument bank shows what it is next to its file name
+    // (GM banks ship as 001.gig, 002.gig, ...)
+    else if(
+        instruments.size() == 1
+        && (format == QStringLiteral("GIG") || format == QStringLiteral("DLS")
+            || format == QStringLiteral("SF2"))
+        && !isPlaceholderInstrumentName(instruments[0]))
+    {
+      const auto name = QString::fromStdString(instruments[0]).trimmed();
+      if(name.compare(pdata.prettyName, Qt::CaseInsensitive) != 0)
+        pdata.prettyName += QStringLiteral(" – ") + name;
+    }
 
     Library::ProcessEntry e;
     e.rootKey = pdata.key;

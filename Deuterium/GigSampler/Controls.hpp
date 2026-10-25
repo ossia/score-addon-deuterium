@@ -70,6 +70,13 @@ enum SamplerControl : int
   VelToPitchEnv,
   NoteOff,
   MidiChannel,
+  MonoFade,
+  GlideType,
+  NotePriority,
+  MaxInterval,
+  ChordWindow,
+  PolyGlideFrom,
+  PerChannel,
 
   ControlCount
 };
@@ -95,6 +102,8 @@ inline constexpr bool isTimeControl(int c) noexcept
     case LfoRate:
     case LfoDelay:
     case PitchEnvDecay:
+    case MonoFade:
+    case ChordWindow:
       return true;
     default:
       return false;
@@ -161,13 +170,15 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
 
   flt(VelAmount, 0.f, 1.f, 1.f, QStringLiteral("Vel > volume"));
   // "Hard" (v^2) is exactly the SF2 default velocity-to-attenuation curve
-  // (concave, 960 cB): the default every mainstream SoundFont player uses
+  // (concave, 960 cB): the default every mainstream SoundFont player uses.
+  // "From file" is the gig file's own curve, and Hard for the other formats.
   combo(
       VelCurve,
       {{QStringLiteral("Linear"), 0},
        {QStringLiteral("Soft"), 1},
-       {QStringLiteral("Hard"), 2}},
-      2, QStringLiteral("Vel curve"));
+       {QStringLiteral("Hard"), 2},
+       {QStringLiteral("From file"), 3}},
+      3, QStringLiteral("Vel curve"));
   flt(VelToStart, 0.f, 1.f, 0.f, QStringLiteral("Vel > start"));
   flt(VelXfade, 0.f, 1.f, 0.f, QStringLiteral("Layer crossfade"));
 
@@ -175,7 +186,12 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
       VoiceMode,
       {{QStringLiteral("Poly"), 0},
        {QStringLiteral("Mono"), 1},
-       {QStringLiteral("Legato"), 2}},
+       {QStringLiteral("Legato"), 2},
+       {QStringLiteral("Mono fingered"), 3},
+       {QStringLiteral("Legato fingered"), 4},
+       {QStringLiteral("Duophonic"), 5},
+       {QStringLiteral("Poly glide"), 6},
+       {QStringLiteral("Poly legato"), 7}},
       0, QStringLiteral("Voices"));
   time(Glide, 0.f, 2.f, 0.f, QStringLiteral("Glide"));
   v[Polyphony] = new Process::IntSlider{
@@ -258,6 +274,42 @@ inline std::vector<Process::ControlInlet*> makeSamplerControls(QObject* parent)
     v[MidiChannel] = new Process::ComboBox{
         std::move(channels), 0, QStringLiteral("MIDI channel"), id(MidiChannel), parent};
   }
+
+  // Mono / legato: how fast the note a new one replaces fades out. Short
+  // enough not to hear the previous note (or a chord's other notes) ring.
+  time(MonoFade, 0.f, 1.f, 0.01f, QStringLiteral("Mono fade"));
+
+  // What the Glide time means: the time per octave or per whole tone (the
+  // glide lengthens with the interval), the time of any glide, or an
+  // analog-style exponential lag
+  combo(
+      GlideType,
+      {{QStringLiteral("Constant rate (octave)"), 0},
+       {QStringLiteral("Constant rate (tone)"), 1},
+       {QStringLiteral("Constant time"), 2},
+       {QStringLiteral("Exponential"), 3}},
+      0, QStringLiteral("Glide type"));
+
+  // Mono modes and duophonic: which held key sounds
+  combo(
+      NotePriority,
+      {{QStringLiteral("Last"), 0},
+       {QStringLiteral("Highest"), 1},
+       {QStringLiteral("Lowest"), 2}},
+      0, QStringLiteral("Note priority"));
+  // Poly glide / legato: pairing of the new notes with the previous ones.
+  // The chord window delays the notes by its length (0 = no delay, paired
+  // with the nearest as they come).
+  v[MaxInterval] = new Process::IntSlider{
+      1, 48, 12, QStringLiteral("Max interval"), id(MaxInterval), parent};
+  time(ChordWindow, 0.f, 0.1f, 0.f, QStringLiteral("Chord window"));
+  combo(
+      PolyGlideFrom,
+      {{QStringLiteral("Nearest note"), 0}, {QStringLiteral("Last note"), 1}},
+      0, QStringLiteral("Poly glide from"));
+  // Each MIDI channel its own mono line, with its own pitch bend (MPE)
+  v[PerChannel] = new Process::Toggle{
+      false, QStringLiteral("Line per channel"), id(PerChannel), parent};
 
   return v;
 }
