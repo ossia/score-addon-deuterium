@@ -12,6 +12,11 @@
 #include "TestHelpers.hpp"
 
 #include <QCoreApplication>
+#include <QFile>
+#include <gig.h>
+#include <QThread>
+#include <QElapsedTimer>
+#include <QTemporaryDir>
 
 #include <catch2/reporters/catch_reporter_event_listener.hpp>
 #include <catch2/reporters/catch_reporter_registrars.hpp>
@@ -205,6 +210,34 @@ TEST_CASE("model: document_without_note_off_and_channel_loads", "[deuterium]")
   CHECK(ossia::convert<int>(channel->value()) == 10);
 }
 
+// A combobox saves its entries in the document: one saved before entries
+// were added (Voices before the fingered modes) gets the current entries on
+// load, and keeps its value
+TEST_CASE("model: older_combobox_entries_are_refreshed", "[deuterium]")
+{
+  bootApp();
+  Deuterium::Gig::ProcessModel current{
+      TimeVal::fromMsecs(1000), "", Id<Process::ProcessModel>{22}, nullptr};
+  auto* voices = qobject_cast<Process::ComboBox*>(
+      current.inlets()[1 + Deuterium::Gig::VoiceMode]);
+  REQUIRE(voices);
+  const auto entries = voices->alternatives;
+  REQUIRE(entries.size() == 8);
+  voices->setAlternatives({entries.begin(), entries.begin() + 3});
+  voices->setValue(2); // Legato
+  REQUIRE(voices->alternatives.size() == 3);
+
+  auto doc = toValue(
+      score::marshall<JSONObject>(static_cast<const Process::ProcessModel&>(current)));
+  JSONObject::Deserializer des{doc};
+  Deuterium::Gig::ProcessModel loaded{des, nullptr};
+  auto* restored = qobject_cast<Process::ComboBox*>(
+      loaded.inlets()[1 + Deuterium::Gig::VoiceMode]);
+  REQUIRE(restored);
+  CHECK(restored->alternatives == entries);
+  CHECK(ossia::convert<int>(restored->value()) == 2);
+}
+
 // The "<path>|<instrument>" creation string is split at construction and
 // the instrument index survives serialization as its own field, so saved
 // documents do not depend on filesystem state to parse the reference.
@@ -387,4 +420,123 @@ TEST_CASE("model: switching instrument cancels the load in flight", "[deuterium]
   CHECK(p.instrument() == 1);
   CHECK(first->load(std::memory_order_relaxed));
   CHECK(p.currentLoadToken() != first);
+}
+
+// The bend range a gig bank specifies becomes the Bend range control when
+// the user creates the process or picks the bank; a restored document keeps
+// its own value
+TEST_CASE("model: the bank's bend range on user loads only", "[deuterium]")
+{
+  bootApp();
+  QTemporaryDir dir;
+  REQUIRE(dir.isValid());
+  const QString path = dir.filePath(QStringLiteral("bend.gig"));
+  {
+    gig::File f;
+    std::vector<int16_t> data(400, 1000);
+    gig::Sample* smp = f.AddSample();
+    smp->Channels = 1;
+    smp->BitDepth = 16;
+    smp->FrameSize = 2;
+    smp->SamplesPerSecond = 44100;
+    smp->Resize(data.size());
+    gig::Instrument* ins = f.AddInstrument();
+    ins->PitchbendRange = 7;
+    gig::Region* rgn = ins->AddRegion();
+    rgn->SetSample(smp);
+    rgn->pDimensionRegions[0]->pSample = smp;
+    f.Save(path.toStdString());
+    smp->SetPos(0);
+    smp->Write(data.data(), data.size());
+  }
+  // Until the load in flight has landed (fileChanged)
+  auto waitLoaded = [](Deuterium::Gig::ProcessModel& p) {
+    bool landed = false;
+    auto c = QObject::connect(
+        &p, &Deuterium::Gig::ProcessModel::fileChanged, [&] { landed = true; });
+    QElapsedTimer t;
+    t.start();
+    while(!landed && t.elapsed() < 10000)
+    {
+      QCoreApplication::processEvents();
+      QThread::msleep(5);
+    }
+    QObject::disconnect(c);
+    return landed && p.gigInfo() != nullptr;
+  };
+  auto bend = [](Deuterium::Gig::ProcessModel& p) {
+    auto* ctl = qobject_cast<Process::ControlInlet*>(
+        p.inlets()[1 + Deuterium::Gig::BendRange]);
+    REQUIRE(ctl);
+    return ossia::convert<float>(ctl->value());
+  };
+
+  Deuterium::Gig::ProcessModel created{
+      TimeVal::fromMsecs(1000), path, Id<Process::ProcessModel>{40}, nullptr};
+  REQUIRE(waitLoaded(created));
+  CHECK(bend(created) == 7.f);
+
+  // Another bank, the range untouched: it follows the bank
+  const QString other = dir.filePath(QStringLiteral("bend9.gig"));
+  QFile::copy(path, other);
+  {
+    RIFF::File riff(other.toStdString());
+    gig::File f(&riff);
+    f.GetInstrument(0)->PitchbendRange = 9;
+    f.Save();
+  }
+  auto* fileCtl = qobject_cast<Process::ControlInlet*>(
+      created.inlets()[1 + Deuterium::Gig::File]);
+  REQUIRE(fileCtl);
+  fileCtl->setValue(other.toStdString());
+  REQUIRE(waitLoaded(created));
+  CHECK(bend(created) == 9.f);
+
+  // A range the user chose is kept when the bank changes (or an undo
+  // brings the previous one back)
+  qobject_cast<Process::ControlInlet*>(
+      created.inlets()[1 + Deuterium::Gig::BendRange])
+      ->setValue(5.f);
+  fileCtl->setValue(path.toStdString());
+  REQUIRE(waitLoaded(created));
+  CHECK(bend(created) == 5.f);
+
+  // The user sets another range, the document is saved and reopened
+  qobject_cast<Process::ControlInlet*>(
+      created.inlets()[1 + Deuterium::Gig::BendRange])
+      ->setValue(3.f);
+  auto doc = toValue(
+      score::marshall<JSONObject>(static_cast<const Process::ProcessModel&>(created)));
+  JSONObject::Deserializer des{doc};
+  Deuterium::Gig::ProcessModel restored{des, nullptr};
+  REQUIRE(waitLoaded(restored));
+  CHECK(bend(restored) == 3.f);
+}
+
+// Documents from before Mono fade / Vel curve existed get the behaviour they
+// were made with: a 0.3 s fade of the replaced mono note, the hard curve
+TEST_CASE("model: older documents keep their mono fade and velocity curve", "[deuterium]")
+{
+  bootApp();
+  Deuterium::Gig::ProcessModel current{
+      TimeVal::fromMsecs(1000), "", Id<Process::ProcessModel>{41}, nullptr};
+  auto doc = toValue(
+      score::marshall<JSONObject>(static_cast<const Process::ProcessModel&>(current)));
+  auto& inlets = doc["Inlets"];
+  // A document predating every control from VelCurve on
+  inlets.Erase(inlets.Begin() + 1 + Deuterium::Gig::VelCurve, inlets.End());
+  JSONObject::Deserializer des{doc};
+  Deuterium::Gig::ProcessModel loaded{des, nullptr};
+  auto control = [&](int c) {
+    auto* ctl = qobject_cast<Process::ControlInlet*>(loaded.inlets()[1 + c]);
+    REQUIRE(ctl);
+    return ctl->value();
+  };
+  CHECK(ossia::convert<int>(control(Deuterium::Gig::VelCurve)) == 2);
+  const auto fade = ossia::convert<ossia::vec2f>(control(Deuterium::Gig::MonoFade));
+  CHECK(std::abs(fade[0] - 0.3f) < 1e-6);
+  // A new process has the new defaults
+  auto* fresh = qobject_cast<Process::ControlInlet*>(
+      current.inlets()[1 + Deuterium::Gig::VelCurve]);
+  CHECK(ossia::convert<int>(fresh->value()) == 3);
 }

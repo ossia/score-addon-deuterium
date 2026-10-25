@@ -1,6 +1,7 @@
 #pragma once
 #include <ossia/dataflow/nodes/media.hpp>
 
+#include <array>
 #include <atomic>
 #include <memory>
 #include <string>
@@ -122,6 +123,33 @@ struct GigRegion
   int selectionAlgo{0};      // how same-zone alternatives are picked:
                              // 0 = all/velocity, 1 = round-robin, 2 = random
 
+  // gig: the file's own velocity -> gain response (0..1 per velocity);
+  // null = the Vel curve control's built-in curves
+  std::shared_ptr<const std::array<float, 128>> velGainTable;
+  // gig EG1: attack start level (0..1), and the fall from the sustain level
+  // to silence while the key is held (seconds; < 0 = sustain held)
+  double eg1PreAttack{0.0};
+  double eg1Decay2{-1.0};
+  // gig release triggers: gain lost per second the note was held (0 = none)
+  double releaseTriggerDecay{0.0};
+
+  // gig filter, on top of vcfEnabled / vcfCutoff: the SamplerParams filter
+  // type to use, the per-velocity cutoff factor, keyboard tracking around a
+  // breakpoint key, and EG2 / LFO2 scaling the cutoff (in 0..127 units)
+  int vcfType{2}; // SamplerParams::FilterLowpass
+  std::shared_ptr<const std::array<float, 128>> vcfVelTable;
+  int vcfKeytrackBreakpoint{-1}; // < 0 = no keyboard tracking
+  bool gigCutoffEnv{false};      // EG2 (eg2* fields) scales the cutoff
+  float eg2PreAttack{0.f};       // 0..1
+  float gigLfo2Depth{0.f};       // 0..1 of the cutoff taken away at the peak
+  float gigLfo2Freq{1.f};        // Hz
+
+  // gig layer crossfade: gain from a controller value through the
+  // in/out ramps; xfadeSource -1 = none, -2 = velocity, else a CC number
+  int xfadeSource{-1};
+  bool xfadeInvert{false};
+  uint8_t xfadeInStart{0}, xfadeInEnd{0}, xfadeOutStart{0}, xfadeOutEnd{0};
+
   // Display name of the sound, for formats that have one (Hydrogen drum
   // names); shown on the trigger pads
   std::string noteLabel;
@@ -140,7 +168,7 @@ struct GigInstrument
 {
   std::string name;
   int32_t attenuation{0};
-  uint16_t pitchbendRange{2};
+  int pitchbendRange{-1}; // semitones; < 0 = the bank does not say
   std::vector<GigRegion> regions;
 };
 
@@ -165,6 +193,12 @@ ParsedInstrumentPath parseInstrumentPath(const QString& data);
 // Lists the names of all instruments (gig/dls) or presets (sf2) of a file,
 // without loading any sample data. Returns an empty list on error.
 std::vector<std::string> listInstruments(const QString& filePath);
+
+// Whether an instrument name says nothing about the instrument: empty, the
+// placeholders DLS converters write ("Single-Region Instrument",
+// "Instrument 3"...), or the "Program N" labels listInstruments() gives
+// those instead
+bool isPlaceholderInstrumentName(const std::string& name);
 
 // Human-readable format family of a sample file, determined by content
 // sniffing with the extension as fallback: "GIG", "DLS", "SF2" or "Drumkit".

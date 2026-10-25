@@ -78,7 +78,7 @@ void applySamplerControl(SamplerParams& p, int control, const ossia::value& val)
       flt(p.velAmount, 0.f, 1.f);
       break;
     case VelCurve:
-      num(p.velCurve, 0, 2);
+      num(p.velCurve, 0, 3);
       break;
     case VelToStart:
       flt(p.velToStart, 0.f, 1.f);
@@ -87,7 +87,7 @@ void applySamplerControl(SamplerParams& p, int control, const ossia::value& val)
       flt(p.velXfade, 0.f, 1.f);
       break;
     case VoiceMode:
-      num(p.voiceMode, 0, SamplerParams::Legato);
+      num(p.voiceMode, 0, SamplerParams::PolyLegato);
       break;
     case Glide:
       flt(p.glide, 0.f, 30.f);
@@ -145,6 +145,27 @@ void applySamplerControl(SamplerParams& p, int control, const ossia::value& val)
       break;
     case MidiChannel:
       num(p.midiChannel, 0, 16);
+      break;
+    case MonoFade:
+      flt(p.monoFade, 0.f, 10.f);
+      break;
+    case GlideType:
+      num(p.glideType, 0, SamplerParams::GlideExponential);
+      break;
+    case NotePriority:
+      num(p.notePriority, 0, SamplerParams::PriorityLowest);
+      break;
+    case MaxInterval:
+      num(p.maxInterval, 0, 127);
+      break;
+    case ChordWindow:
+      flt(p.chordWindow, 0.f, 1.f);
+      break;
+    case PolyGlideFrom:
+      num(p.polyGlideFrom, 0, SamplerParams::GlideFromLast);
+      break;
+    case PerChannel:
+      p.perChannel = ossia::convert<bool>(val);
       break;
     default:
       break;
