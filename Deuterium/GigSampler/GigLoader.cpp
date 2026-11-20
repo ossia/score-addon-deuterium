@@ -1,5 +1,7 @@
 #include "GigLoader.hpp"
 
+#include "BankNames.hpp"
+
 #include <Media/AudioDecoder.hpp>
 #include <Media/MediaFileHandle.hpp>
 
@@ -1495,16 +1497,23 @@ void applyDlsArticulations(DLS::Articulator& art, GigRegion& region)
 // DLS rips and conversions (VGMTrans and the like) name every instrument
 // "Single-Region Instrument", "Instrument 3", ...: the bank and program
 // number are what tells them apart
-std::string dlsInstrumentName(DLS::Instrument* in)
+std::string
+dlsInstrumentLabel(std::string name, bool isDrum, uint32_t program, uint16_t bank)
 {
-  std::string name = in->pInfo ? in->pInfo->Name : std::string{};
   if(!isPlaceholderInstrumentName(name))
     return name;
-  std::string label = in->IsDrum ? "Drum kit " : "Program ";
-  label += std::to_string(in->MIDIProgram);
-  if(in->MIDIBank != 0)
-    label = "Bank " + std::to_string(in->MIDIBank) + ", " + label;
+  std::string label = isDrum ? "Drum kit " : "Program ";
+  label += std::to_string(program);
+  if(bank != 0)
+    label = "Bank " + std::to_string(bank) + ", " + label;
   return label;
+}
+
+std::string dlsInstrumentName(DLS::Instrument* in)
+{
+  return dlsInstrumentLabel(
+      in->pInfo ? in->pInfo->Name : std::string{}, in->IsDrum, in->MIDIProgram,
+      in->MIDIBank);
 }
 
 std::shared_ptr<GigFileInfo>
@@ -2647,6 +2656,63 @@ std::vector<std::string> listInstruments(const QString& filePath)
     return {};
   }
   return names;
+}
+
+std::vector<std::string>
+listInstrumentNames(const QString& filePath, InstrumentNamesSource* source)
+{
+  if(source)
+    *source = {};
+
+  std::optional<BankKind> kind;
+  switch(formatForPath(filePath))
+  {
+    case SampleFileFormat::Gig:
+      kind = BankKind::Gig;
+      break;
+    case SampleFileFormat::Dls:
+      kind = BankKind::Dls;
+      break;
+    case SampleFileFormat::Sf2:
+      kind = BankKind::Sf2;
+      break;
+    case SampleFileFormat::Hydrogen:
+    case SampleFileFormat::Korg:
+    case SampleFileFormat::AudioFile:
+      break;
+  }
+
+  if(kind)
+  {
+    const char* whyNot{};
+    if(auto entries = readBankNames(filePath, *kind, &whyNot))
+    {
+      std::vector<std::string> names;
+      names.reserve(entries->size());
+      for(auto& e : *entries)
+      {
+        if(*kind == BankKind::Dls)
+        {
+          // The MIDI locale as DLS::Instrument decodes it: drum flag in the
+          // top bit, bank select MSB and LSB as two 7-bit fields
+          const uint16_t bank
+              = uint16_t(((e.dlsBank & 0x7F00u) >> 8) << 7) | (e.dlsBank & 0x7Fu);
+          names.push_back(dlsInstrumentLabel(
+              std::move(e.name), e.dlsBank & 0x80000000u, e.dlsProgram, bank));
+        }
+        else
+        {
+          names.push_back(std::move(e.name));
+        }
+      }
+      if(source)
+        source->direct = true;
+      return names;
+    }
+    if(source)
+      source->whyNotDirect = whyNot;
+  }
+  return listInstruments(filePath);
 }
 
 QString formatName(const QString& filePath)

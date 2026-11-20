@@ -194,6 +194,23 @@ ParsedInstrumentPath parseInstrumentPath(const QString& data);
 // without loading any sample data. Returns an empty list on error.
 std::vector<std::string> listInstruments(const QString& filePath);
 
+// Where listInstrumentNames() got its names from
+struct InstrumentNamesSource
+{
+  // Read from the name chunks alone, without parsing the bank
+  bool direct{false};
+  // When a gig, dls or sf2 file had to be parsed after all: what was
+  // unexpected in it (static string)
+  const char* whyNotDirect{nullptr};
+};
+
+// Same result as listInstruments(), for enumerating many files: the names of
+// gig, dls and sf2 banks are read straight from the chunks that hold them
+// whenever the file is laid out as expected, instead of parsing the whole
+// bank. For listing a library, not for loading an instrument.
+std::vector<std::string> listInstrumentNames(
+    const QString& filePath, InstrumentNamesSource* source = nullptr);
+
 // Whether an instrument name says nothing about the instrument: empty, the
 // placeholders DLS converters write ("Single-Region Instrument",
 // "Instrument 3"...), or the "Program N" labels listInstruments() gives
