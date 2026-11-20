@@ -42,6 +42,16 @@ class LibraryHandler final
   // plays instrument 0).
   std::optional<Library::ProcessEntry> scanPath(std::string_view path) override
   {
+    return scanPathWith(
+        path, [](const QString& file) { return listInstrumentNames(file); });
+  }
+
+public:
+  // The scan, given what lists the instruments of a file
+  template <typename Lister>
+  std::optional<Library::ProcessEntry>
+  scanPathWith(std::string_view path, Lister&& listNames) const
+  {
     score::PathInfo file{path};
 
     // Of the .xml files, only Hydrogen drumkits belong to this sampler
@@ -60,7 +70,7 @@ class LibraryHandler final
         = QString::fromUtf8(file.absoluteFilePath.data(), file.absoluteFilePath.size());
 
     // Enumerating the file's instruments reads no sample data.
-    auto instruments = listInstruments(pdata.customData);
+    std::vector<std::string> instruments = listNames(pdata.customData);
 
     // Unparseable files and instrument-less containers (e.g. GigaPulse
     // impulse-response shells) cannot be played: keep them out of the library
@@ -107,6 +117,7 @@ class LibraryHandler final
     return e;
   }
 
+private:
   QStringList categoryPath(
       const score::PathInfo& file, const QString& format,
       const QString& fileName) const noexcept

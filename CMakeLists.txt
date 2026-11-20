@@ -44,6 +44,7 @@ set(LIBGIG_SRCS
 
 # Files & main target
 set(HDRS
+  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/BankNames.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Controls.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Executor/Component.hpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/GigLoader.hpp"
@@ -58,6 +59,7 @@ set(HDRS
   "${CMAKE_CURRENT_SOURCE_DIR}/score_addon_deuterium.hpp"
 )
 set(SRCS
+  "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/BankNames.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/Controls.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/GigLoader.cpp"
   "${CMAKE_CURRENT_SOURCE_DIR}/Deuterium/GigSampler/ProcessFactory.cpp"

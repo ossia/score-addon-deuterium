@@ -38,6 +38,7 @@ set(DEUTERIUM_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 # linking the plugin.
 function(add_deuterium_tool TESTNAME TESTSRCS)
   add_executable(${TESTNAME} ${TESTSRCS} ${ARGN}
+    "${DEUTERIUM_ROOT}/Deuterium/GigSampler/BankNames.cpp"
     "${DEUTERIUM_ROOT}/Deuterium/GigSampler/GigLoader.cpp"
     ${LIBGIG_SRCS}
   )
@@ -86,6 +87,14 @@ endfunction()
 
 add_deuterium_test(Deuterium_GigLoaderTest
   "${CMAKE_CURRENT_SOURCE_DIR}/GigLoaderTest.cpp"
+)
+
+# The library scan's reader of instrument names against libgig; set
+# DEUTERIUM_BANK_ROOTS to compare them over a whole sample collection.
+add_deuterium_test(Deuterium_BankNamesTest
+  "${CMAKE_CURRENT_SOURCE_DIR}/BankNamesTest.cpp"
+  "${DEUTERIUM_ROOT}/Deuterium/GigSampler/ProcessModel.cpp"
+  "${DEUTERIUM_ROOT}/Deuterium/GigSampler/ProcessModelSerialization.cpp"
 )
 
 add_deuterium_test(Deuterium_SamplerEngineTest
