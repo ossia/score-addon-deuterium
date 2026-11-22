@@ -16,7 +16,10 @@ PROCESS_METADATA(
     "Deuterium", Process::ProcessCategory::Synth, "Synths",
     "Sampler for GIG/DLS/SF2/KORG banks, Hydrogen drumkits and audio files",
     "ossia score",
-    (QStringList{"Script", "Deuterium", "Sampler", "GigSampler"}), {}, {},
+    (QStringList{"Script", "Deuterium", "Sampler", "GigSampler"}),
+    // As ProcessModel makes them: MIDI in, the sampler's controls, audio out
+    (std::vector<Process::PortType>{Process::PortType::Midi, Process::PortType::Message}),
+    (std::vector<Process::PortType>{Process::PortType::Audio}),
     QUrl("https://ossia.io/score-docs/processes/deuterium.html"),
     Process::ProcessFlags::SupportsAll | Process::ProcessFlags::PutInNewSlot
         | Process::ProcessFlags::ControlSurface)
