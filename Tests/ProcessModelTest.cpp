@@ -540,3 +540,23 @@ TEST_CASE("model: older documents keep their mono fade and velocity curve", "[de
       current.inlets()[1 + Deuterium::Gig::VelCurve]);
   CHECK(ossia::convert<int>(fresh->value()) == 3);
 }
+
+TEST_CASE("model: its descriptor lists the kinds of every port it makes", "[deuterium]")
+{
+  // The process picker offers, from a port, what says it can be cabled to it
+  bootApp();
+  Deuterium::Gig::ProcessModel p{
+      TimeVal::fromMsecs(1000), "", Id<Process::ProcessModel>{3}, nullptr};
+  const auto d = Metadata<Process::Descriptor_k, Deuterium::Gig::ProcessModel>::get();
+  REQUIRE(d.inlets);
+  REQUIRE(d.outlets);
+  for(const Process::Port* port : p.inlets())
+    CHECK(std::find(d.inlets->begin(), d.inlets->end(), port->type()) != d.inlets->end());
+  for(const Process::Port* port : p.outlets())
+    CHECK(std::find(d.outlets->begin(), d.outlets->end(), port->type()) != d.outlets->end());
+  // And no kind it does not make: a MIDI outlet would draw it from MIDI outlets
+  for(auto t : *d.outlets)
+    CHECK(std::any_of(p.outlets().begin(), p.outlets().end(), [t](auto* o) {
+      return o->type() == t;
+    }));
+}
